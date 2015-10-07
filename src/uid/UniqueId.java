@@ -15,10 +15,13 @@ package net.opentsdb.uid;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.xml.bind.DatatypeConverter;
@@ -61,7 +64,7 @@ public final class UniqueId implements UniqueIdInterface {
     TAGK,
     TAGV
   }
-  
+
   /** Charset used to convert Strings to byte arrays and back. */
   private static final Charset CHARSET = Charset.forName("ISO-8859-1");
   /** The single column family used by this class. */
@@ -104,18 +107,21 @@ public final class UniqueId implements UniqueIdInterface {
   /** Map of pending UID assignments */
   private final HashMap<String, Deferred<byte[]>> pending_assignments =
     new HashMap<String, Deferred<byte[]>>();
+  /** Set of UID rename */
+  private final Set<String> renaming_id_names =
+    Collections.synchronizedSet(new HashSet<String>());
 
   /** Number of times we avoided reading from HBase thanks to the cache. */
   private volatile int cache_hits;
   /** Number of times we had to read from HBase and populate the cache. */
   private volatile int cache_misses;
-  /** How many times we collided with an existing ID when attempting to 
+  /** How many times we collided with an existing ID when attempting to
    * generate a new UID */
   private volatile int random_id_collisions;
 
   /** Whether or not to generate new UIDMetas */
   private TSDB tsdb;
-  
+
   /**
    * Constructor.
    * @param client The HBase client to use.
@@ -129,7 +135,7 @@ public final class UniqueId implements UniqueIdInterface {
                   final int width) {
     this(client, table, kind, width, false);
   }
-  
+
   /**
    * Constructor.
    * @param client The HBase client to use.
@@ -176,7 +182,7 @@ public final class UniqueId implements UniqueIdInterface {
   public int randomIdCollisions() {
     return random_id_collisions;
   }
-  
+
   public String kind() {
     return fromBytes(kind);
   }
@@ -189,15 +195,15 @@ public final class UniqueId implements UniqueIdInterface {
   public void setTSDB(final TSDB tsdb) {
     this.tsdb = tsdb;
   }
-  
-  /** The largest possible ID given the number of bytes the IDs are 
+
+  /** The largest possible ID given the number of bytes the IDs are
    * represented on.
    * @deprecated Use {@link Internal.getMaxUnsignedValueOnBytes}
    */
   public long maxPossibleId() {
     return Internal.getMaxUnsignedValueOnBytes(id_width);
   }
-  
+
   /**
    * Causes this instance to discard all its in-memory caches.
    * @since 1.1
@@ -260,7 +266,7 @@ public final class UniqueId implements UniqueIdInterface {
           throw new NoSuchUniqueId(kind(), id);
         }
         addNameToCache(id, name);
-        addIdToCache(name, id);        
+        addIdToCache(name, id);
         return name;
       }
     }
@@ -367,9 +373,9 @@ public final class UniqueId implements UniqueIdInterface {
         MAX_ATTEMPTS_ASSIGN_RANDOM_ID : MAX_ATTEMPTS_ASSIGN_ID;
 
     private HBaseException hbe = null;  // Last exception caught.
-    // TODO(manolama) - right now if we retry the assignment it will create a 
+    // TODO(manolama) - right now if we retry the assignment it will create a
     // callback chain MAX_ATTEMPTS_* long and call the ErrBack that many times.
-    // This can be cleaned up a fair amount but it may require changing the 
+    // This can be cleaned up a fair amount but it may require changing the
     // public behavior a bit. For now, the flag will prevent multiple attempts
     // to execute the callback.
     private boolean called = false; // whether we called the deferred or not
@@ -404,7 +410,7 @@ public final class UniqueId implements UniqueIdInterface {
         LOG.error("Failed to assign an ID for kind='" + kind()
                   + "' name='" + name + "'", hbe);
         if (hbe == null) {
-          throw new FailedToAssignUniqueIdException(kind(), name, 
+          throw new FailedToAssignUniqueIdException(kind(), name,
               MAX_ATTEMPTS_ASSIGN_RANDOM_ID);
         }
         throw hbe;
@@ -412,7 +418,7 @@ public final class UniqueId implements UniqueIdInterface {
 
       if (arg instanceof Exception) {
         final String msg = ("Failed attempt #" + (randomize_id
-                         ? (MAX_ATTEMPTS_ASSIGN_RANDOM_ID - attempt) 
+                         ? (MAX_ATTEMPTS_ASSIGN_RANDOM_ID - attempt)
                          : (MAX_ATTEMPTS_ASSIGN_ID - attempt))
                          + " to assign an UID for " + kind() + ':' + name
                          + " at step #" + state);
@@ -437,7 +443,7 @@ public final class UniqueId implements UniqueIdInterface {
           return assignment;
         }
       }
-      
+
       final Deferred d;
       switch (state) {
         case ALLOCATE_UID:
@@ -461,14 +467,14 @@ public final class UniqueId implements UniqueIdInterface {
      * make sure that there isn't a UID collision.
      */
     private Deferred<Long> allocateUid() {
-      LOG.info("Creating " + (randomize_id ? "a random " : "an ") + 
+      LOG.info("Creating " + (randomize_id ? "a random " : "an ") +
           "ID for kind='" + kind() + "' name='" + name + '\'');
 
       state = CREATE_REVERSE_MAPPING;
       if (randomize_id) {
         return Deferred.fromResult(RandomUniqueId.getRandomUID());
       } else {
-        return client.atomicIncrement(new AtomicIncrementRequest(table, 
+        return client.atomicIncrement(new AtomicIncrementRequest(table,
                                       MAXID_ROW, ID_FAMILY, kind));
       }
     }
@@ -530,10 +536,10 @@ public final class UniqueId implements UniqueIdInterface {
       if (!(arg instanceof Boolean)) {
         throw new IllegalStateException("Expected a Boolean but got " + arg);
       }
-      if (!((Boolean) arg)) {  // Previous CAS failed. 
+      if (!((Boolean) arg)) {  // Previous CAS failed.
         if (randomize_id) {
           // This random Id is already used by another row
-          LOG.warn("Detected random id collision and retrying kind='" + 
+          LOG.warn("Detected random id collision and retrying kind='" +
               kind() + "' name='" + name + "'");
           random_id_collisions++;
         } else {
@@ -576,7 +582,7 @@ public final class UniqueId implements UniqueIdInterface {
               + "servers kind='" + kind() + "' name='" + name + "'");
           random_id_collisions++;
         }
-        
+
         class GetIdCB implements Callback<Object, byte[]> {
           public Object call(final byte[] row) throws Exception {
             assignment.callback(row);
@@ -588,14 +594,14 @@ public final class UniqueId implements UniqueIdInterface {
       }
 
       cacheMapping(name, row);
-      
+
       if (tsdb != null && tsdb.getConfig().enable_realtime_uid()) {
         final UIDMeta meta = new UIDMeta(type, row, name);
         meta.storeNew(tsdb);
         LOG.info("Wrote UIDMeta for: " + name);
         tsdb.indexUIDMeta(meta);
       }
-      
+
       synchronized(pending_assignments) {
         if (pending_assignments.remove(name) != null) {
           LOG.info("Completed pending assignment for: " + name);
@@ -611,8 +617,8 @@ public final class UniqueId implements UniqueIdInterface {
   private void cacheMapping(final String name, final byte[] id) {
     addIdToCache(name, id);
     addNameToCache(id, name);
-  } 
-  
+  }
+
   /**
    * Finds the ID associated with a given name or creates it.
    * <p>
@@ -637,9 +643,9 @@ public final class UniqueId implements UniqueIdInterface {
         assignment = pending_assignments.get(name);
         if (assignment == null) {
           // to prevent UID leaks that can be caused when multiple time
-          // series for the same metric or tags arrive, we need to write a 
-          // deferred to the pending map as quickly as possible. Then we can 
-          // start the assignment process after we've stashed the deferred 
+          // series for the same metric or tags arrive, we need to write a
+          // deferred to the pending map as quickly as possible. Then we can
+          // start the assignment process after we've stashed the deferred
           // and released the lock
           assignment = new Deferred<byte[]>();
           pending_assignments.put(name, assignment);
@@ -647,7 +653,7 @@ public final class UniqueId implements UniqueIdInterface {
           pending = true;
         }
       }
-      
+
       if (pending) {
         LOG.info("Already waiting for UID assignment: " + name);
         try {
@@ -656,7 +662,7 @@ public final class UniqueId implements UniqueIdInterface {
           throw new RuntimeException("Should never be here", e1);
         }
       }
-      
+
       // start the assignment dance after stashing the deferred
       byte[] uid = null;
       try {
@@ -702,15 +708,15 @@ public final class UniqueId implements UniqueIdInterface {
     class HandleNoSuchUniqueNameCB implements Callback<Object, Exception> {
       public Object call(final Exception e) {
         if (e instanceof NoSuchUniqueName) {
-          
+
           Deferred<byte[]> assignment = null;
           synchronized (pending_assignments) {
             assignment = pending_assignments.get(name);
             if (assignment == null) {
               // to prevent UID leaks that can be caused when multiple time
-              // series for the same metric or tags arrive, we need to write a 
-              // deferred to the pending map as quickly as possible. Then we can 
-              // start the assignment process after we've stashed the deferred 
+              // series for the same metric or tags arrive, we need to write a
+              // deferred to the pending map as quickly as possible. Then we can
+              // start the assignment process after we've stashed the deferred
               // and released the lock
               assignment = new Deferred<byte[]>();
               pending_assignments.put(name, assignment);
@@ -719,7 +725,7 @@ public final class UniqueId implements UniqueIdInterface {
               return assignment;
             }
           }
-          
+
           // start the assignment dance after stashing the deferred
           return new UniqueIdAllocator(name, assignment).tryAllocate();
         }
@@ -747,7 +753,7 @@ public final class UniqueId implements UniqueIdInterface {
   public List<String> suggest(final String search) throws HBaseException {
     return suggest(search, MAX_SUGGESTIONS);
   }
-      
+
   /**
    * Attempts to find suggestions of names given a search term.
    * @param search The search term (possibly empty).
@@ -760,7 +766,7 @@ public final class UniqueId implements UniqueIdInterface {
    * @throws IllegalArgumentException if the count was less than 1
    * @since 2.0
    */
-  public List<String> suggest(final String search, final int max_results) 
+  public List<String> suggest(final String search, final int max_results)
     throws HBaseException {
     if (max_results < 1) {
       throw new IllegalArgumentException("Count must be greater than 0");
@@ -787,7 +793,7 @@ public final class UniqueId implements UniqueIdInterface {
    * HBase.
    * @since 1.1
    */
-  public Deferred<List<String>> suggestAsync(final String search, 
+  public Deferred<List<String>> suggestAsync(final String search,
       final int max_results) {
     return new SuggestCB(search, max_results).search();
   }
@@ -815,7 +821,7 @@ public final class UniqueId implements UniqueIdInterface {
       if (rows == null) {  // We're done scanning.
         return suggestions;
       }
-      
+
       for (final ArrayList<KeyValue> row : rows) {
         if (row.size() != 1) {
           LOG.error("WTF shouldn't happen!  Scanner " + scanner + " returned"
@@ -829,7 +835,7 @@ public final class UniqueId implements UniqueIdInterface {
         final byte[] id = row.get(0).value();
         final byte[] cached_id = name_cache.get(name);
         if (cached_id == null) {
-          cacheMapping(name, id); 
+          cacheMapping(name, id);
         } else if (!Arrays.equals(id, cached_id)) {
           throw new IllegalStateException("WTF?  For kind=" + kind()
             + " name=" + name + ", we have id=" + Arrays.toString(cached_id)
@@ -869,6 +875,7 @@ public final class UniqueId implements UniqueIdInterface {
    */
   public void rename(final String oldname, final String newname) {
     final byte[] row = getId(oldname);
+    final String row_string = fromBytes(row);
     {
       byte[] id = null;
       try {
@@ -882,6 +889,15 @@ public final class UniqueId implements UniqueIdInterface {
           + " assigned ID=" + Arrays.toString(id));
       }
     }
+
+    if (renaming_id_names.contains(row_string)
+        || renaming_id_names.contains(newname)) {
+      throw new IllegalArgumentException("Ongoing rename on the same ID(\""
+        + Arrays.toString(row) + "\") or an identical new name(\"" + newname
+        + "\")");
+    }
+    renaming_id_names.add(row_string);
+    renaming_id_names.add(newname);
 
     final byte[] newnameb = toBytes(newname);
 
@@ -898,6 +914,8 @@ public final class UniqueId implements UniqueIdInterface {
       LOG.error("When trying rename(\"" + oldname
         + "\", \"" + newname + "\") on " + this + ": Failed to update reverse"
         + " mapping for ID=" + Arrays.toString(row), e);
+      renaming_id_names.remove(row_string);
+      renaming_id_names.remove(newname);
       throw e;
     }
 
@@ -911,6 +929,8 @@ public final class UniqueId implements UniqueIdInterface {
       LOG.error("When trying rename(\"" + oldname
         + "\", \"" + newname + "\") on " + this + ": Failed to create the"
         + " new forward mapping with ID=" + Arrays.toString(row), e);
+      renaming_id_names.remove(row_string);
+      renaming_id_names.remove(newname);
       throw e;
     }
 
@@ -935,6 +955,9 @@ public final class UniqueId implements UniqueIdInterface {
         + " old forward mapping for ID=" + Arrays.toString(row);
       LOG.error("WTF?  " + msg, e);
       throw new RuntimeException(msg, e);
+    } finally {
+      renaming_id_names.remove(row_string);
+      renaming_id_names.remove(newname);
     }
     // Success!
   }
@@ -949,12 +972,12 @@ public final class UniqueId implements UniqueIdInterface {
    * If either mapping fails then the cache can be re-populated later on with
    * stale data. In that case, please run the FSCK utility.
    * <p>
-   * WARNING 2: This method will NOT delete time series data or TSMeta data 
+   * WARNING 2: This method will NOT delete time series data or TSMeta data
    * associated with the UIDs. It only removes them from the UID table. Deleting
    * a metric is generally safe as you won't query over it in the future. But
    * deleting tag keys or values can cause queries to fail if they find data
    * without a corresponding name.
-   * 
+   *
    * @param name The name of the UID to delete
    * @return A deferred to wait on for completion. The result will be null if
    * successful, an exception otherwise.
@@ -967,25 +990,25 @@ public final class UniqueId implements UniqueIdInterface {
       throw new IllegalStateException("The TSDB is null for this UID object.");
     }
     final byte[] uid = new byte[id_width];
-    final ArrayList<Deferred<Object>> deferreds = 
+    final ArrayList<Deferred<Object>> deferreds =
         new ArrayList<Deferred<Object>>(2);
-    
+
     /** Catches errors and still cleans out the cache */
     class ErrCB implements Callback<Object, Exception> {
       @Override
       public Object call(final Exception ex) throws Exception {
         name_cache.remove(name);
         id_cache.remove(fromBytes(uid));
-        LOG.error("Failed to delete " + fromBytes(kind) + " UID " + name 
+        LOG.error("Failed to delete " + fromBytes(kind) + " UID " + name
             + " but still cleared the cache", ex);
         return ex;
       }
     }
-    
+
     /** Used to wait on the group of delete requests */
     class GroupCB implements Callback<Deferred<Object>, ArrayList<Object>> {
       @Override
-      public Deferred<Object> call(final ArrayList<Object> response) 
+      public Deferred<Object> call(final ArrayList<Object> response)
           throws Exception {
         name_cache.remove(name);
         id_cache.remove(fromBytes(uid));
@@ -993,7 +1016,7 @@ public final class UniqueId implements UniqueIdInterface {
         return Deferred.fromResult(null);
       }
     }
-    
+
     /** Called after fetching the UID from storage */
     class LookupCB implements Callback<Deferred<Object>, byte[]> {
       @Override
@@ -1002,42 +1025,42 @@ public final class UniqueId implements UniqueIdInterface {
           return Deferred.fromError(new NoSuchUniqueName(kind(), name));
         }
         System.arraycopy(stored_uid, 0, uid, 0, id_width);
-        final DeleteRequest forward = 
+        final DeleteRequest forward =
             new DeleteRequest(table, toBytes(name), ID_FAMILY, kind);
         deferreds.add(tsdb.getClient().delete(forward));
-        
-        final DeleteRequest reverse = 
+
+        final DeleteRequest reverse =
             new DeleteRequest(table, uid, NAME_FAMILY, kind);
         deferreds.add(tsdb.getClient().delete(reverse));
-        
-        final DeleteRequest meta = new DeleteRequest(table, uid, NAME_FAMILY, 
+
+        final DeleteRequest meta = new DeleteRequest(table, uid, NAME_FAMILY,
             toBytes((type.toString().toLowerCase() + "_meta")));
         deferreds.add(tsdb.getClient().delete(meta));
         return Deferred.group(deferreds).addCallbackDeferring(new GroupCB());
       }
     }
-    
+
     final byte[] cached_uid = name_cache.get(name);
     if (cached_uid == null) {
       return getIdFromHBase(name).addCallbackDeferring(new LookupCB())
           .addErrback(new ErrCB());
     }
     System.arraycopy(cached_uid, 0, uid, 0, id_width);
-    final DeleteRequest forward = 
+    final DeleteRequest forward =
         new DeleteRequest(table, toBytes(name), ID_FAMILY, kind);
     deferreds.add(tsdb.getClient().delete(forward));
-    
-    final DeleteRequest reverse = 
+
+    final DeleteRequest reverse =
         new DeleteRequest(table, uid, NAME_FAMILY, kind);
     deferreds.add(tsdb.getClient().delete(reverse));
-    
-    final DeleteRequest meta = new DeleteRequest(table, uid, NAME_FAMILY, 
+
+    final DeleteRequest meta = new DeleteRequest(table, uid, NAME_FAMILY,
         toBytes((type.toString().toLowerCase() + "_meta")));
     deferreds.add(tsdb.getClient().delete(meta));
     return Deferred.group(deferreds).addCallbackDeferring(new GroupCB())
         .addErrback(new ErrCB());
   }
-  
+
   /** The start row to scan on empty search strings.  `!' = first ASCII char. */
   private static final byte[] START_ROW = new byte[] { '!' };
 
@@ -1153,13 +1176,13 @@ public final class UniqueId implements UniqueIdInterface {
   public static String uidToString(final byte[] uid) {
     return DatatypeConverter.printHexBinary(uid);
   }
-  
+
   /**
    * Converts a hex string to a byte array
    * If the {@code uid} is less than {@code uid_length * 2} characters wide, it
    * will be padded with 0s to conform to the spec. E.g. if the tagk width is 3
-   * and the given {@code uid} string is "1", the string will be padded to 
-   * "000001" and then converted to a byte array to reach 3 bytes. 
+   * and the given {@code uid} string is "1", the string will be padded to
+   * "000001" and then converted to a byte array to reach 3 bytes.
    * All {@code uid}s are padded to 1 byte. If given "1", and {@code uid_length}
    * is 0, the uid will be padded to "01" then converted.
    * @param uid The UID to convert
@@ -1185,7 +1208,7 @@ public final class UniqueId implements UniqueIdInterface {
   public static long uidToLong(final String uid, final short uid_length) {
     return uidToLong(stringToUid(uid), uid_length);
   }
-  
+
   /**
    * Converts a UID to an integer value. The array must be the same length as
    * uid_length or an exception will be thrown.
@@ -1198,15 +1221,15 @@ public final class UniqueId implements UniqueIdInterface {
    */
   public static long uidToLong(final byte[] uid, final short uid_length) {
     if (uid.length != uid_length) {
-      throw new IllegalArgumentException("UID was " + uid.length 
+      throw new IllegalArgumentException("UID was " + uid.length
           + " bytes long but expected to be " + uid_length);
     }
-    
+
     final byte[] uid_raw = new byte[8];
     System.arraycopy(uid, 0, uid_raw, 8 - uid_length, uid_length);
     return Bytes.getLong(uid_raw);
   }
- 
+
   /**
    * Converts a Long to a byte array with the proper UID width
    * @param uid The UID to convert
@@ -1221,7 +1244,7 @@ public final class UniqueId implements UniqueIdInterface {
     final byte[] padded = Bytes.fromLong(uid);
     for (int i = 0; i < padded.length - width; i++) {
       if (padded[i] != 0) {
-        final String message = "UID " + Long.toString(uid) + 
+        final String message = "UID " + Long.toString(uid) +
           " was too large for " + width + " bytes";
         LOG.error("OMG " + message);
         throw new IllegalStateException(message);
@@ -1230,7 +1253,7 @@ public final class UniqueId implements UniqueIdInterface {
     // Shrink the ID on the requested number of bytes.
     return Arrays.copyOfRange(padded, padded.length - width, padded.length);
   }
-  
+
   /**
    * Appends the given UID to the given string buffer, followed by "\\E".
    * @param buf The buffer to append
@@ -1251,7 +1274,7 @@ public final class UniqueId implements UniqueIdInterface {
     }
     buf.append("\\E");
   }
-  
+
   /**
    * Attempts to convert the given string to a type enumerator
    * @param type The string to convert
@@ -1260,7 +1283,7 @@ public final class UniqueId implements UniqueIdInterface {
    * @since 2.0
    */
   public static UniqueIdType stringToUniqueIdType(final String type) {
-    if (type.toLowerCase().equals("metric") || 
+    if (type.toLowerCase().equals("metric") ||
         type.toLowerCase().equals("metrics")) {
       return UniqueIdType.METRIC;
     } else if (type.toLowerCase().equals("tagk")) {
@@ -1271,13 +1294,13 @@ public final class UniqueId implements UniqueIdInterface {
       throw new IllegalArgumentException("Invalid type requested: " + type);
     }
   }
-  
+
   /**
    * Converts a hex string to a byte array
    * If the {@code uid} is less than {@code uid_length * 2} characters wide, it
    * will be padded with 0s to conform to the spec. E.g. if the tagk width is 3
-   * and the given {@code uid} string is "1", the string will be padded to 
-   * "000001" and then converted to a byte array to reach 3 bytes. 
+   * and the given {@code uid} string is "1", the string will be padded to
+   * "000001" and then converted to a byte array to reach 3 bytes.
    * All {@code uid}s are padded to 1 byte. If given "1", and {@code uid_length}
    * is 0, the uid will be padded to "01" then converted.
    * @param uid The UID to convert
@@ -1314,12 +1337,12 @@ public final class UniqueId implements UniqueIdInterface {
    * @throws IllegalArgumentException if the row key is missing tags or it is
    * corrupt such as a salted key when salting is disabled or vice versa.
    */
-  public static byte[] getTSUIDFromKey(final byte[] row_key, 
+  public static byte[] getTSUIDFromKey(final byte[] row_key,
       final short metric_width, final short timestamp_width) {
     int idx = 0;
     // validation
     final int tag_pair_width = TSDB.tagk_width() + TSDB.tagv_width();
-    final int tags_length = row_key.length - 
+    final int tags_length = row_key.length -
         (Const.SALT_WIDTH() + metric_width + timestamp_width);
     if (tags_length < tag_pair_width || (tags_length % tag_pair_width) != 0) {
       throw new IllegalArgumentException(
@@ -1328,7 +1351,7 @@ public final class UniqueId implements UniqueIdInterface {
     final byte[] tsuid = new byte[
                  row_key.length - timestamp_width - Const.SALT_WIDTH()];
     for (int i = Const.SALT_WIDTH(); i < row_key.length; i++) {
-      if (i < Const.SALT_WIDTH() + metric_width || 
+      if (i < Const.SALT_WIDTH() + metric_width ||
           i >= (Const.SALT_WIDTH() + metric_width + timestamp_width)) {
         tsuid[idx] = row_key[i];
         idx++;
@@ -1336,7 +1359,7 @@ public final class UniqueId implements UniqueIdInterface {
     }
     return tsuid;
   }
-  
+
   /**
    * Extracts a list of tagks and tagvs as individual values in a list
    * @param tsuid The tsuid to parse
@@ -1352,10 +1375,10 @@ public final class UniqueId implements UniqueIdInterface {
       throw new IllegalArgumentException(
           "TSUID is too short, may be missing tags");
     }
-     
+
     final List<byte[]> tags = new ArrayList<byte[]>();
     final int pair_width = (TSDB.tagk_width() * 2) + (TSDB.tagv_width() * 2);
-    
+
     // start after the metric then iterate over each tagk/tagv pair
     for (int i = TSDB.metrics_width() * 2; i < tsuid.length(); i+= pair_width) {
       if (i + pair_width > tsuid.length()){
@@ -1369,7 +1392,7 @@ public final class UniqueId implements UniqueIdInterface {
     }
     return tags;
   }
-   
+
   /**
    * Extracts a list of tagk/tagv pairs from a tsuid
    * @param tsuid The tsuid to parse
@@ -1385,10 +1408,10 @@ public final class UniqueId implements UniqueIdInterface {
        throw new IllegalArgumentException(
            "TSUID is too short, may be missing tags");
      }
-      
+
      final List<byte[]> tags = new ArrayList<byte[]>();
      final int pair_width = (TSDB.tagk_width() * 2) + (TSDB.tagv_width() * 2);
-     
+
      // start after the metric then iterate over each tagk/tagv pair
      for (int i = TSDB.metrics_width() * 2; i < tsuid.length(); i+= pair_width) {
        if (i + pair_width > tsuid.length()){
@@ -1400,7 +1423,7 @@ public final class UniqueId implements UniqueIdInterface {
      }
      return tags;
    }
-  
+
   /**
    * Extracts a list of tagk/tagv pairs from a tsuid
    * @param tsuid The tsuid to parse
@@ -1416,10 +1439,10 @@ public final class UniqueId implements UniqueIdInterface {
       throw new IllegalArgumentException(
           "TSUID is too short, may be missing tags");
     }
-     
+
     final List<byte[]> tags = new ArrayList<byte[]>();
     final int pair_width = TSDB.tagk_width() + TSDB.tagv_width();
-    
+
     // start after the metric then iterate over each tagk/tagv pair
     for (int i = TSDB.metrics_width(); i < tsuid.length; i+= pair_width) {
       if (i + pair_width > tsuid.length){
@@ -1430,9 +1453,9 @@ public final class UniqueId implements UniqueIdInterface {
     }
     return tags;
   }
-  
+
   /**
-   * Returns a map of max UIDs from storage for the given list of UID types 
+   * Returns a map of max UIDs from storage for the given list of UID types
    * @param tsdb The TSDB to which we belong
    * @param kinds A list of qualifiers to fetch
    * @return A map with the "kind" as the key and the maximum assigned UID as
@@ -1441,18 +1464,18 @@ public final class UniqueId implements UniqueIdInterface {
    */
   public static Deferred<Map<String, Long>> getUsedUIDs(final TSDB tsdb,
       final byte[][] kinds) {
-    
+
     /**
-     * Returns a map with 0 if the max ID row hasn't been initialized yet, 
+     * Returns a map with 0 if the max ID row hasn't been initialized yet,
      * otherwise the map has actual data
      */
-    final class GetCB implements Callback<Map<String, Long>, 
+    final class GetCB implements Callback<Map<String, Long>,
       ArrayList<KeyValue>> {
 
       @Override
       public Map<String, Long> call(final ArrayList<KeyValue> row)
           throws Exception {
-        
+
         final Map<String, Long> results = new HashMap<String, Long>(3);
         if (row == null || row.isEmpty()) {
           // it could be the case that this is the first time the TSD has run
@@ -1463,12 +1486,12 @@ public final class UniqueId implements UniqueIdInterface {
           }
           return results;
         }
-        
+
         for (final KeyValue column : row) {
-          results.put(new String(column.qualifier(), CHARSET), 
+          results.put(new String(column.qualifier(), CHARSET),
               Bytes.getLong(column.value()));
         }
-        
+
         // if the user is starting with a fresh UID table, we need to account
         // for missing columns
         for (final byte[] kind : kinds) {
@@ -1478,9 +1501,9 @@ public final class UniqueId implements UniqueIdInterface {
         }
         return results;
       }
-      
+
     }
-    
+
     final GetRequest get = new GetRequest(tsdb.uidTable(), MAXID_ROW);
     get.family(ID_FAMILY);
     get.qualifiers(kinds);
@@ -1490,7 +1513,7 @@ public final class UniqueId implements UniqueIdInterface {
   /**
    * Pre-load UID caches, scanning up to "tsd.core.preload_uid_cache.max_entries"
    * rows from the UID table.
-   * @param tsdb The TSDB to use 
+   * @param tsdb The TSDB to use
    * @param uid_cache_map A map of {@link UniqueId} objects keyed on the kind.
    * @throws HBaseException Passes any HBaseException from HBase scanner.
    * @throws RuntimeException Wraps any non HBaseException from HBase scanner.
@@ -1507,7 +1530,7 @@ public final class UniqueId implements UniqueIdInterface {
     Scanner scanner = null;
     try {
       int num_rows = 0;
-      scanner = getSuggestScanner(tsdb.getClient(), tsdb.uidTable(), "", null, 
+      scanner = getSuggestScanner(tsdb.getClient(), tsdb.uidTable(), "", null,
           max_results);
       for (ArrayList<ArrayList<KeyValue>> rows = scanner.nextRows().join();
           rows != null;

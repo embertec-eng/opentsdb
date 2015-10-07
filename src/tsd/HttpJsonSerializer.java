@@ -67,27 +67,27 @@ class HttpJsonSerializer extends HttpSerializer {
   /** Type reference for incoming data points */
   private static TypeReference<ArrayList<IncomingDataPoint>> TR_INCOMING =
     new TypeReference<ArrayList<IncomingDataPoint>>() {};
-  
+
   /** Type reference for uid assignments */
   private static TypeReference<HashMap<String, List<String>>> UID_ASSIGN =
     new TypeReference<HashMap<String, List<String>>>() {};
   /** Type reference for common string/string maps */
-  private static TypeReference<HashMap<String, String>> TR_HASH_MAP = 
+  private static TypeReference<HashMap<String, String>> TR_HASH_MAP =
     new TypeReference<HashMap<String, String>>() {};
-  private static TypeReference<ArrayList<TreeRule>> TR_TREE_RULES = 
+  private static TypeReference<ArrayList<TreeRule>> TR_TREE_RULES =
     new TypeReference<ArrayList<TreeRule>>() {};
-  private static TypeReference<HashMap<String, Object>> TR_HASH_MAP_OBJ = 
+  private static TypeReference<HashMap<String, Object>> TR_HASH_MAP_OBJ =
     new TypeReference<HashMap<String, Object>>() {};
-  private static TypeReference<List<Annotation>> TR_ANNOTATIONS = 
+  private static TypeReference<List<Annotation>> TR_ANNOTATIONS =
       new TypeReference<List<Annotation>>() {};
-    
+
   /**
    * Default constructor necessary for plugin implementation
    */
   public HttpJsonSerializer() {
     super();
   }
-  
+
   /**
    * Constructor that sets the query object
    * @param query Request/resposne object
@@ -95,18 +95,18 @@ class HttpJsonSerializer extends HttpSerializer {
   public HttpJsonSerializer(final HttpQuery query) {
     super(query);
   }
-  
+
   /** Initializer, nothing to do for the JSON serializer */
   @Override
   public void initialize(final TSDB tsdb) {
     // nothing to see here
   }
-  
+
   /** Nothing to do on shutdown */
   public Deferred<Object> shutdown() {
     return new Deferred<Object>();
   }
-  
+
   /** @return the version */
   @Override
   public String version() {
@@ -118,7 +118,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public String shortName() {
     return "json";
   }
-  
+
   /**
    * Parses one or more data points for storage
    * @return an array of data points to process for storage
@@ -136,9 +136,9 @@ class HttpJsonSerializer extends HttpSerializer {
     final int firstbyte = content.charAt(0);
     try {
       if (firstbyte == '{') {
-        final IncomingDataPoint dp = 
+        final IncomingDataPoint dp =
           JSON.parseToObject(content, IncomingDataPoint.class);
-        final ArrayList<IncomingDataPoint> dps = 
+        final ArrayList<IncomingDataPoint> dps =
           new ArrayList<IncomingDataPoint>(1);
         dps.add(dp);
         return dps;
@@ -149,7 +149,7 @@ class HttpJsonSerializer extends HttpSerializer {
       throw new BadRequestException("Unable to parse the given JSON", iae);
     }
   }
-  
+
   /**
    * Parses a suggestion query
    * @return a hash map of key/value pairs
@@ -165,13 +165,13 @@ class HttpJsonSerializer extends HttpSerializer {
           "Supply valid JSON formatted data in the body of your request");
     }
     try {
-      return JSON.parseToObject(query.getContent(), 
+      return JSON.parseToObject(query.getContent(),
           new TypeReference<HashMap<String, String>>(){});
     } catch (IllegalArgumentException iae) {
       throw new BadRequestException("Unable to parse the given JSON", iae);
     }
   }
-  
+
   /**
    * Parses a list of metrics, tagk and/or tagvs to assign UIDs to
    * @return as hash map of lists for the different types
@@ -191,7 +191,27 @@ class HttpJsonSerializer extends HttpSerializer {
       throw new BadRequestException("Unable to parse the given JSON", iae);
     }
   }
-  
+
+  /**
+   * Parses metric, tagk or tagv, and name to rename UID
+   * @return as hash map of type and name
+   * @throws JSONException if parsing failed
+   * @throws BadRequestException if the content was missing or parsing failed
+   */
+  public HashMap<String, String> parseUidRenameV1() {
+    final String json = query.getContent();
+    if (json == null || json.isEmpty()) {
+      throw new BadRequestException(HttpResponseStatus.BAD_REQUEST,
+          "Missing message content",
+          "Supply valid JSON formatted data in the body of your request");
+    }
+    try {
+      return JSON.parseToObject(json, TR_HASH_MAP);
+    } catch (IllegalArgumentException iae) {
+      throw new BadRequestException("Unable to parse the given JSON", iae);
+    }
+  }
+
   /**
    * Parses a timeseries data query
    * @return A TSQuery with data ready to validate
@@ -211,7 +231,7 @@ class HttpJsonSerializer extends HttpSerializer {
       throw new BadRequestException("Unable to parse the given JSON", iae);
     }
   }
-  
+
   /**
    * Parses a last data point query
    * @return A LastPointQuery to work with
@@ -231,7 +251,7 @@ class HttpJsonSerializer extends HttpSerializer {
       throw new BadRequestException("Unable to parse the given JSON", iae);
     }
   }
-  
+
   /**
    * Parses a single UIDMeta object
    * @throws JSONException if parsing failed
@@ -250,7 +270,7 @@ class HttpJsonSerializer extends HttpSerializer {
       throw new BadRequestException("Unable to parse the given JSON", iae);
     }
   }
-  
+
   /**
    * Parses a single TSMeta object
    * @throws JSONException if parsing failed
@@ -269,12 +289,12 @@ class HttpJsonSerializer extends HttpSerializer {
       throw new BadRequestException("Unable to parse the given JSON", iae);
     }
   }
-  
+
   /**
    * Parses a single Tree object
-   * <b>Note:</b> Incoming data is a hash map of strings instead of directly 
-   * deserializing to a tree. We do it this way because we don't want users 
-   * messing with the timestamp fields. 
+   * <b>Note:</b> Incoming data is a hash map of strings instead of directly
+   * deserializing to a tree. We do it this way because we don't want users
+   * messing with the timestamp fields.
    * @return A parsed Tree
    * @throws JSONException if parsing failed
    * @throws BadRequestException if the content was missing or parsing failed
@@ -287,16 +307,16 @@ class HttpJsonSerializer extends HttpSerializer {
           "Supply valid JSON formatted data in the body of your request");
     }
     try {
-      final HashMap<String, String> properties = 
+      final HashMap<String, String> properties =
         JSON.parseToObject(json, TR_HASH_MAP);
-      
+
       final Tree tree = new Tree();
       for (Map.Entry<String, String> entry : properties.entrySet()) {
         // skip nulls, empty is fine, but nulls are not welcome here
         if (entry.getValue() == null) {
           continue;
         }
-        
+
         if (entry.getKey().toLowerCase().equals("treeid")) {
           tree.setTreeId(Integer.parseInt(entry.getValue()));
         } else if (entry.getKey().toLowerCase().equals("name")) {
@@ -332,7 +352,7 @@ class HttpJsonSerializer extends HttpSerializer {
       throw new BadRequestException("Unable to parse the given JSON", iae);
     }
   }
-  
+
   /**
    * Parses a single TreeRule object
    * @return A parsed tree rule
@@ -346,10 +366,10 @@ class HttpJsonSerializer extends HttpSerializer {
           "Missing message content",
           "Supply valid JSON formatted data in the body of your request");
     }
-    
+
     return JSON.parseToObject(json, TreeRule.class);
   }
-  
+
   /**
    * Parses one or more tree rules
    * @return A list of one or more rules
@@ -363,15 +383,15 @@ class HttpJsonSerializer extends HttpSerializer {
           "Missing message content",
           "Supply valid JSON formatted data in the body of your request");
     }
-    
+
     return JSON.parseToObject(json, TR_TREE_RULES);
   }
-  
+
   /**
    * Parses a tree ID and optional list of TSUIDs to search for collisions or
    * not matched TSUIDs.
-   * @return A map with "treeId" as an integer and optionally "tsuids" as a 
-   * List<String> 
+   * @return A map with "treeId" as an integer and optionally "tsuids" as a
+   * List<String>
    * @throws JSONException if parsing failed
    * @throws BadRequestException if the content was missing or parsing failed
    */
@@ -382,10 +402,10 @@ class HttpJsonSerializer extends HttpSerializer {
           "Missing message content",
           "Supply valid JSON formatted data in the body of your request");
     }
-    
+
     return JSON.parseToObject(json, TR_HASH_MAP_OBJ);
   }
-  
+
   /**
    * Parses an annotation object
    * @return An annotation object
@@ -399,10 +419,10 @@ class HttpJsonSerializer extends HttpSerializer {
           "Missing message content",
           "Supply valid JSON formatted data in the body of your request");
     }
-    
+
     return JSON.parseToObject(json, Annotation.class);
   }
-  
+
   /**
    * Parses a list of annotation objects
    * @return A list of annotation object
@@ -416,10 +436,10 @@ class HttpJsonSerializer extends HttpSerializer {
           "Missing message content",
           "Supply valid JSON formatted data in the body of your request");
     }
-    
+
     return JSON.parseToObject(json, TR_ANNOTATIONS);
   }
-  
+
   /**
    * Parses a bulk annotation deletion query object
    * @return Settings used to bulk delete annotations
@@ -433,10 +453,10 @@ class HttpJsonSerializer extends HttpSerializer {
           "Missing message content",
           "Supply valid JSON formatted data in the body of your request");
     }
-    
+
     return JSON.parseToObject(json, AnnotationBulkDelete.class);
   }
-  
+
   /**
    * Parses a SearchQuery request
    * @return The parsed search query
@@ -450,16 +470,16 @@ class HttpJsonSerializer extends HttpSerializer {
           "Missing message content",
           "Supply valid JSON formatted data in the body of your request");
     }
-    
+
     return JSON.parseToObject(json, SearchQuery.class);
   }
-  
+
   /**
    * Formats the results of an HTTP data point storage request
    * @param results A map of results. The map will consist of:
    * <ul><li>success - (long) the number of successfully parsed datapoints</li>
    * <li>failed - (long) the number of datapoint parsing failures</li>
-   * <li>errors - (ArrayList<HashMap<String, Object>>) an optional list of 
+   * <li>errors - (ArrayList<HashMap<String, Object>>) an optional list of
    * datapoints that had errors. The nested map has these fields:
    * <ul><li>error - (String) the error that occurred</li>
    * <li>datapoint - (IncomingDatapoint) the datapoint that generated the error
@@ -470,7 +490,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatPutV1(final Map<String, Object> results) {
     return this.serializeJSON(results);
   }
-  
+
   /**
    * Formats a suggestion response
    * @param suggestions List of suggestions for the given type
@@ -481,7 +501,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatSuggestV1(final List<String> suggestions) {
     return this.serializeJSON(suggestions);
   }
-  
+
   /**
    * Format the serializer status map
    * @return A JSON structure
@@ -490,7 +510,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatSerializersV1() {
     return serializeJSON(HttpQuery.getSerializerStatus());
   }
-  
+
   /**
    * Format the list of implemented aggregators
    * @param aggregators The list of aggregation functions
@@ -500,7 +520,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatAggregatorsV1(final Set<String> aggregators) {
     return this.serializeJSON(aggregators);
   }
-  
+
   /**
    * Format a hash map of information about the OpenTSDB version
    * @param version A hash map with version information
@@ -510,7 +530,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatVersionV1(final Map<String, String> version) {
     return this.serializeJSON(version);
   }
-  
+
   /**
    * Format a response from the DropCaches call
    * @param response A hash map with a response
@@ -520,7 +540,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatDropCachesV1(final Map<String, String> response) {
     return this.serializeJSON(response);
   }
-  
+
   /**
    * Format a response from the Uid Assignment RPC
    * @param response A map of lists of pairs representing the results of the
@@ -528,11 +548,20 @@ class HttpJsonSerializer extends HttpSerializer {
    * @return A JSON structure
    * @throws JSONException if serialization failed
    */
-  public ChannelBuffer formatUidAssignV1(final 
+  public ChannelBuffer formatUidAssignV1(final
       Map<String, TreeMap<String, String>> response) {
     return this.serializeJSON(response);
   }
-  
+
+  /**
+   * Format a response from the Uid Rename RPC
+   * @param response A map of result and error of the rename
+   * @return A JSON structure
+   * @throws JSONException if serialization failed
+   */
+  public ChannelBuffer formatUidRenameV1(final Map<String, String> response) {
+    return this.serializeJSON(response);
+  }
   /**
    * Format the results from a timeseries data query
    * @param data_query The TSQuery object used to fetch the results
@@ -540,7 +569,7 @@ class HttpJsonSerializer extends HttpSerializer {
    * @param globals An optional list of global annotation objects
    * @return A ChannelBuffer object to pass on to the caller
    */
-  public ChannelBuffer formatQueryV1(final TSQuery data_query, 
+  public ChannelBuffer formatQueryV1(final TSQuery data_query,
       final List<DataPoints[]> results, final List<Annotation> globals) {
     try {
       return formatQueryAsyncV1(data_query, results, globals)
@@ -551,7 +580,7 @@ class HttpJsonSerializer extends HttpSerializer {
       throw new RuntimeException("Shouldn't be here", e);
     }
   }
-  
+
   /**
    * Format the results from a timeseries data query
    * @param data_query The TSQuery object used to fetch the results
@@ -561,30 +590,30 @@ class HttpJsonSerializer extends HttpSerializer {
    * @throws IOException if serialization failed
    * @since 2.2
    */
-  public Deferred<ChannelBuffer> formatQueryAsyncV1(final TSQuery data_query, 
-      final List<DataPoints[]> results, final List<Annotation> globals) 
+  public Deferred<ChannelBuffer> formatQueryAsyncV1(final TSQuery data_query,
+      final List<DataPoints[]> results, final List<Annotation> globals)
           throws IOException {
-    
+
     final long start = DateTime.currentTimeMillis();
     final boolean as_arrays = this.query.hasQueryStringParam("arrays");
     final String jsonp = this.query.getQueryStringParam("jsonp");
-    
+
     // buffers and an array list to stored the deferreds
     final ChannelBuffer response = ChannelBuffers.dynamicBuffer();
     final OutputStream output = new ChannelBufferOutputStream(response);
-    // too bad an inner class can't modify a primitive. This is a work around 
+    // too bad an inner class can't modify a primitive. This is a work around
     final List<Boolean> timeout_flag = new ArrayList<Boolean>(1);
     timeout_flag.add(false);
-    
+
     // start with JSONp if we're told to
     if (jsonp != null && !jsonp.isEmpty()) {
       output.write((jsonp + "(").getBytes(query.getCharset()));
     }
-    
+
     // start the JSON generator and write the opening array
     final JsonGenerator json = JSON.getFactory().createGenerator(output);
     json.writeStartArray();
- 
+
     /**
      * Every individual data point set (the result of a query and possibly a
      * group by) will initiate an asynchronous metric/tag UID to name resolution
@@ -600,15 +629,15 @@ class HttpJsonSerializer extends HttpSerializer {
       /** Resolved aggregated tags */
       final List<String> agg_tags = new ArrayList<String>();
       /** A list storing the metric and tag resolve calls */
-      final List<Deferred<Object>> resolve_deferreds = 
+      final List<Deferred<Object>> resolve_deferreds =
           new ArrayList<Deferred<Object>>();
       /** The data points to serialize */
       final DataPoints dps;
-      
+
       public DPsResolver(final DataPoints dps) {
         this.dps = dps;
       }
-      
+
       /** Resolves the metric UID to a name*/
       class MetricResolver implements Callback<Object, String> {
         public Object call(final String metric) throws Exception {
@@ -616,7 +645,7 @@ class HttpJsonSerializer extends HttpSerializer {
           return null;
         }
       }
-      
+
       /** Resolves the tag UIDs to a key/value string set */
       class TagResolver implements Callback<Object, Map<String, String>> {
         public Object call(final Map<String, String> tags) throws Exception {
@@ -624,7 +653,7 @@ class HttpJsonSerializer extends HttpSerializer {
           return null;
         }
       }
-      
+
       /** Resolves aggregated tags */
       class AggTagResolver implements Callback<Object, List<String>> {
         public Object call(final List<String> tags) throws Exception {
@@ -632,13 +661,13 @@ class HttpJsonSerializer extends HttpSerializer {
           return null;
         }
       }
-      
+
       /** After the metric and tags have been resolved, this will print the
        * results to the output buffer in the proper format.
        */
       class WriteToBuffer implements Callback<Object, ArrayList<Object>> {
         final DataPoints dps;
-        
+
         /**
          * Default ctor that takes a data point set
          * @param dps Datapoints to print
@@ -646,7 +675,7 @@ class HttpJsonSerializer extends HttpSerializer {
         public WriteToBuffer(final DataPoints dps) {
           this.dps = dps;
         }
-        
+
         /**
          * Handles writing the data to the output buffer. The results of the
          * deferreds don't matter as they will be stored in the class final
@@ -655,10 +684,10 @@ class HttpJsonSerializer extends HttpSerializer {
         public Object call(final ArrayList<Object> deferreds) throws Exception {
           final TSSubQuery orig_query = data_query.getQueries()
               .get(dps.getQueryIndex());
-          
+
           json.writeStartObject();
           json.writeStringField("metric", metric.toString());
-          
+
           json.writeFieldName("tags");
           json.writeStartObject();
           if (dps.getTags() != null) {
@@ -667,7 +696,7 @@ class HttpJsonSerializer extends HttpSerializer {
             }
           }
           json.writeEndObject();
-          
+
           json.writeFieldName("aggregateTags");
           json.writeStartArray();
           if (dps.getAggregatedTags() != null) {
@@ -676,11 +705,11 @@ class HttpJsonSerializer extends HttpSerializer {
             }
           }
           json.writeEndArray();
-          
+
           if (data_query.getShowQuery()) {
             json.writeObjectField("query", orig_query);
           }
-          
+
           if (data_query.getShowTSUIDs()) {
             json.writeFieldName("tsuids");
             json.writeStartArray();
@@ -691,7 +720,7 @@ class HttpJsonSerializer extends HttpSerializer {
             }
             json.writeEndArray();
           }
-          
+
           if (!data_query.getNoAnnotations()) {
             final List<Annotation> annotations = dps.getAnnotations();
             if (annotations != null) {
@@ -702,7 +731,7 @@ class HttpJsonSerializer extends HttpSerializer {
               }
               json.writeEndArray();
             }
-            
+
             if (globals != null && !globals.isEmpty()) {
               Collections.sort(globals);
               json.writeArrayFieldStart("globalAnnotations");
@@ -712,30 +741,30 @@ class HttpJsonSerializer extends HttpSerializer {
               json.writeEndArray();
             }
           }
-          
+
           // now the fun stuff, dump the data and time just the iteration over
           // the data points
           final long dps_start = DateTime.currentTimeMillis();
           json.writeFieldName("dps");
-          
+
           // default is to write a map, otherwise write arrays
           if (!timeout_flag.get(0) && as_arrays) {
             json.writeStartArray();
             for (final DataPoint dp : dps) {
-              if (dp.timestamp() < data_query.startTime() || 
+              if (dp.timestamp() < data_query.startTime() ||
                   dp.timestamp() > data_query.endTime()) {
                 continue;
               }
-              final long timestamp = data_query.getMsResolution() ? 
+              final long timestamp = data_query.getMsResolution() ?
                   dp.timestamp() : dp.timestamp() / 1000;
               json.writeStartArray();
               json.writeNumber(timestamp);
               if (dp.isInteger()) {
                 json.writeNumber(dp.longValue());
-              } else { 
+              } else {
                 // Report missing intervals as null or NaN.
                 final double value = dp.doubleValue();
-                if (Double.isNaN(value) && 
+                if (Double.isNaN(value) &&
                     orig_query.fillPolicy() == FillPolicy.NULL) {
                   json.writeNull();
                 } else {
@@ -748,18 +777,18 @@ class HttpJsonSerializer extends HttpSerializer {
           } else if (!timeout_flag.get(0)) {
             json.writeStartObject();
             for (final DataPoint dp : dps) {
-              if (dp.timestamp() < (data_query.startTime()) || 
+              if (dp.timestamp() < (data_query.startTime()) ||
                   dp.timestamp() > (data_query.endTime())) {
                 continue;
               }
-              final long timestamp = data_query.getMsResolution() ? 
+              final long timestamp = data_query.getMsResolution() ?
                   dp.timestamp() : dp.timestamp() / 1000;
               if (dp.isInteger()) {
                 json.writeNumberField(Long.toString(timestamp), dp.longValue());
               } else {
                 // Report missing intervals as null or NaN.
                 final double value = dp.doubleValue();
-                if (Double.isNaN(value) && 
+                if (Double.isNaN(value) &&
                     orig_query.fillPolicy() == FillPolicy.NULL) {
                   json.writeNumberField(Long.toString(timestamp), null);
                 } else {
@@ -773,12 +802,12 @@ class HttpJsonSerializer extends HttpSerializer {
             json.writeStartObject();
             json.writeEndObject();
           }
-  
+
           final long agg_time = DateTime.currentTimeMillis() - dps_start;
           data_query.getQueryStats().addTimeAggregation(agg_time);
           data_query.getQueryStats().addAggregatedSize(dps.aggregatedSize());
           data_query.getQueryStats().addSize(dps.size());
-          
+
           if (!timeout_flag.get(0) && data_query.getShowStats()) {
             json.writeFieldName("stats");
             json.writeStartObject();
@@ -795,9 +824,9 @@ class HttpJsonSerializer extends HttpSerializer {
           return null;
         }
       }
-      
+
       /**
-       * When called, initiates a resolution of metric and tag UIDs to names, 
+       * When called, initiates a resolution of metric and tag UIDs to names,
        * then prints to the output buffer once they are completed.
        */
       public Deferred<Object> call(final Object obj) throws Exception {
@@ -812,7 +841,7 @@ class HttpJsonSerializer extends HttpSerializer {
       }
 
     }
-    
+
     // We want the serializer to execute serially so we need to create a callback
     // chain so that when one DPsResolver is finished, it triggers the next to
     // start serializing.
@@ -827,7 +856,7 @@ class HttpJsonSerializer extends HttpSerializer {
         }
       }
     }
-  
+
     /** Final callback to close out the JSON array and return our results */
     class FinalCB implements Callback<ChannelBuffer, Object> {
       public ChannelBuffer call(final Object obj)
@@ -851,11 +880,11 @@ class HttpJsonSerializer extends HttpSerializer {
           json.writeEndObject();
           json.writeEndObject();
         }
-        
+
         // IMPORTANT Make sure the close the JSON array and the generator
         json.writeEndArray();
         json.close();
-        
+
         if (jsonp != null && !jsonp.isEmpty()) {
           output.write(")".getBytes());
         }
@@ -867,7 +896,7 @@ class HttpJsonSerializer extends HttpSerializer {
     cb_chain.callback(null);
     return cb_chain.addCallback(new FinalCB());
   }
-  
+
   /**
    * Format a list of last data points
    * @param data_points The results of the query
@@ -878,7 +907,7 @@ class HttpJsonSerializer extends HttpSerializer {
       final List<IncomingDataPoint> data_points) {
     return this.serializeJSON(data_points);
   }
-  
+
   /**
    * Format a single UIDMeta object
    * @param meta The UIDMeta object to serialize
@@ -888,7 +917,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatUidMetaV1(final UIDMeta meta) {
     return this.serializeJSON(meta);
   }
-  
+
   /**
    * Format a single TSMeta object
    * @param meta The TSMeta object to serialize
@@ -898,7 +927,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatTSMetaV1(final TSMeta meta) {
     return this.serializeJSON(meta);
   }
-  
+
   /**
    * Format a a list of TSMeta objects
    * @param meta The list of TSMeta objects to serialize
@@ -908,7 +937,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatTSMetaListV1(final List<TSMeta> metas) {
     return this.serializeJSON(metas);
   }
-  
+
   /**
    * Format a single Branch object
    * @param branch The branch to serialize
@@ -918,7 +947,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatBranchV1(final Branch branch) {
     return this.serializeJSON(branch);
   }
-  
+
   /**
    * Format a single tree object
    * @param tree A tree to format
@@ -928,7 +957,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatTreeV1(final Tree tree) {
     return this.serializeJSON(tree);
   }
-  
+
   /**
    * Format a list of tree objects. Note that the list may be empty if no trees
    * were present.
@@ -939,7 +968,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatTreesV1(final List<Tree> trees) {
     return this.serializeJSON(trees);
   }
-  
+
   /**
    * Format a single TreeRule object
    * @param rule The rule to serialize
@@ -949,10 +978,10 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatTreeRuleV1(final TreeRule rule) {
     return serializeJSON(rule);
   }
-  
+
   /**
    * Format a map of one or more TSUIDs that collided or were not matched
-   * @param results The list of results. Collisions: key = tsuid, value = 
+   * @param results The list of results. Collisions: key = tsuid, value =
    * collided TSUID. Not Matched: key = tsuid, value = message about non matched
    * rules.
    * @param is_collision Whether or the map is a collision result set (true) or
@@ -964,21 +993,21 @@ class HttpJsonSerializer extends HttpSerializer {
       final Map<String, String> results, final boolean is_collisions) {
     return serializeJSON(results);
   }
-  
+
   /**
    * Format the results of testing one or more TSUIDs through a tree's ruleset
    * @param results The list of results. Main map key is the tsuid. Child map:
    * "branch" : Parsed branch result, may be null
    * "meta" : TSMeta object, may be null
-   * "messages" : An ArrayList<String> of one or more messages 
+   * "messages" : An ArrayList<String> of one or more messages
    * @return A JSON structure
    * @throws JSONException if serialization failed
    */
-  public ChannelBuffer formatTreeTestV1(final 
+  public ChannelBuffer formatTreeTestV1(final
       HashMap<String, HashMap<String, Object>> results) {
     return serializeJSON(results);
   }
-  
+
   /**
    * Format an annotation object
    * @param note The annotation object to format
@@ -988,7 +1017,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatAnnotationV1(final Annotation note) {
     return serializeJSON(note);
   }
-  
+
   /**
    * Format a list of annotation objects
    * @param notes The annotation objects to format
@@ -998,7 +1027,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatAnnotationsV1(final List<Annotation> notes) {
     return serializeJSON(notes);
   }
-  
+
   /**
    * Format the results of a bulk annotation deletion
    * @param notes The annotation deletion request to return
@@ -1009,7 +1038,7 @@ class HttpJsonSerializer extends HttpSerializer {
       final AnnotationBulkDelete request) {
     return serializeJSON(request);
   }
-  
+
   /**
    * Format a list of statistics
    * @param note The statistics list to format
@@ -1019,7 +1048,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatStatsV1(final List<IncomingDataPoint> stats) {
     return serializeJSON(stats);
   }
-  
+
   /**
    * Format a list of thread statistics
    * @param stats The thread statistics list to format
@@ -1030,7 +1059,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatThreadStatsV1(final List<Map<String, Object>> stats) {
     return serializeJSON(stats);
   }
-  
+
   /**
    * format a list of region client statistics
    * @param stats The list of region client stats to format
@@ -1052,7 +1081,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatJVMStatsV1(final Map<String, Map<String, Object>> stats) {
     return serializeJSON(stats);
   }
-  
+
   /**
    * Format the query stats
    * @param query_stats Map of query statistics
@@ -1064,7 +1093,7 @@ class HttpJsonSerializer extends HttpSerializer {
       final Map<String, List<Map<String, Object>>> query_stats) {
     return serializeJSON(query_stats);
   }
-  
+
   /**
    * Format the response from a search query
    * @param note The query (hopefully filled with results) to serialize
@@ -1074,7 +1103,7 @@ class HttpJsonSerializer extends HttpSerializer {
   public ChannelBuffer formatSearchResultsV1(final SearchQuery results) {
     return serializeJSON(results);
   }
-  
+
   /**
    * Format the running configuration
    * @param config The running config to serialize
@@ -1090,7 +1119,7 @@ class HttpJsonSerializer extends HttpSerializer {
     }
     return serializeJSON(map);
   }
-  
+
   /**
    * Format the loaded filter configurations
    * @param config The filters to serialize
@@ -1101,7 +1130,7 @@ class HttpJsonSerializer extends HttpSerializer {
       final Map<String, Map<String, String>> config) {
     return serializeJSON(config);
   }
-  
+
   /**
    * Helper object for the format calls to wrap the JSON response in a JSONP
    * function if requested. Used for code dedupe.
@@ -1112,7 +1141,7 @@ class HttpJsonSerializer extends HttpSerializer {
   private ChannelBuffer serializeJSON(final Object obj) {
     if (query.hasQueryStringParam("jsonp")) {
       return ChannelBuffers.wrappedBuffer(
-          JSON.serializeToJSONPBytes(query.getQueryStringParam("jsonp"), 
+          JSON.serializeToJSONPBytes(query.getQueryStringParam("jsonp"),
           obj));
     }
     return ChannelBuffers.wrappedBuffer(JSON.serializeToBytes(obj));

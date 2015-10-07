@@ -48,10 +48,10 @@ final class UniqueIdRpc implements HttpRpc {
 
   @Override
   public void execute(TSDB tsdb, HttpQuery query) throws IOException {
-    
+
     // the uri will be /api/vX/uid/? or /api/uid/?
     final String[] uri = query.explodeAPIPath();
-    final String endpoint = uri.length > 1 ? uri[1] : ""; 
+    final String endpoint = uri.length > 1 ? uri[1] : "";
 
     if (endpoint.toLowerCase().equals("assign")) {
       this.handleAssign(tsdb, query);
@@ -62,8 +62,11 @@ final class UniqueIdRpc implements HttpRpc {
     } else if (endpoint.toLowerCase().equals("tsmeta")) {
       this.handleTSMeta(tsdb, query);
       return;
+    } else if (endpoint.toLowerCase().equals("rename")) {
+      this.handleRename(tsdb, query);
+      return;
     } else {
-      throw new BadRequestException(HttpResponseStatus.NOT_IMPLEMENTED, 
+      throw new BadRequestException(HttpResponseStatus.NOT_IMPLEMENTED,
           "Other UID endpoints have not been implemented yet");
     }
   }
@@ -85,11 +88,11 @@ final class UniqueIdRpc implements HttpRpc {
   private void handleAssign(final TSDB tsdb, final HttpQuery query) {
     // only accept GET And POST
     if (query.method() != HttpMethod.GET && query.method() != HttpMethod.POST) {
-      throw new BadRequestException(HttpResponseStatus.METHOD_NOT_ALLOWED, 
+      throw new BadRequestException(HttpResponseStatus.METHOD_NOT_ALLOWED,
           "Method not allowed", "The HTTP method [" + query.method().getName() +
           "] is not permitted for this endpoint");
     }
-    
+
     final HashMap<String, List<String>> source;
     if (query.method() == HttpMethod.POST) {
       source = query.serializer().parseUidAssignV1();
@@ -108,38 +111,38 @@ final class UniqueIdRpc implements HttpRpc {
         }
       }
     }
-    
+
     if (source.size() < 1) {
       throw new BadRequestException("Missing values to assign UIDs");
     }
-    
-    final Map<String, TreeMap<String, String>> response = 
+
+    final Map<String, TreeMap<String, String>> response =
       new HashMap<String, TreeMap<String, String>>();
-    
+
     int error_count = 0;
     for (Map.Entry<String, List<String>> entry : source.entrySet()) {
-      final TreeMap<String, String> results = 
+      final TreeMap<String, String> results =
         new TreeMap<String, String>();
-      final TreeMap<String, String> errors = 
+      final TreeMap<String, String> errors =
         new TreeMap<String, String>();
-      
+
       for (String name : entry.getValue()) {
         try {
           final byte[] uid = tsdb.assignUid(entry.getKey(), name);
-          results.put(name, 
+          results.put(name,
               UniqueId.uidToString(uid));
         } catch (IllegalArgumentException e) {
           errors.put(name, e.getMessage());
           error_count++;
         }
       }
-      
+
       response.put(entry.getKey(), results);
       if (errors.size() > 0) {
         response.put(entry.getKey() + "_errors", errors);
       }
     }
-    
+
     if (error_count < 1) {
       query.sendReply(query.serializer().formatUidAssignV1(response));
     } else {
@@ -158,7 +161,7 @@ final class UniqueIdRpc implements HttpRpc {
     final HttpMethod method = query.getAPIMethod();
     // GET
     if (method == HttpMethod.GET) {
-      
+
       final String uid = query.getRequiredQueryStringParam("uid");
       final UniqueIdType type = UniqueId.stringToUniqueIdType(
           query.getRequiredQueryStringParam("type"));
@@ -167,43 +170,43 @@ final class UniqueIdRpc implements HttpRpc {
         .joinUninterruptibly();
         query.sendReply(query.serializer().formatUidMetaV1(meta));
       } catch (NoSuchUniqueId e) {
-        throw new BadRequestException(HttpResponseStatus.NOT_FOUND, 
+        throw new BadRequestException(HttpResponseStatus.NOT_FOUND,
             "Could not find the requested UID", e);
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
     // POST
     } else if (method == HttpMethod.POST || method == HttpMethod.PUT) {
-      
+
       final UIDMeta meta;
       if (query.hasContent()) {
         meta = query.serializer().parseUidMetaV1();
       } else {
         meta = this.parseUIDMetaQS(query);
       }
-      
+
       /**
        * Storage callback used to determine if the storage call was successful
        * or not. Also returns the updated object from storage.
        */
       class SyncCB implements Callback<Deferred<UIDMeta>, Boolean> {
-        
+
         @Override
         public Deferred<UIDMeta> call(Boolean success) throws Exception {
           if (!success) {
             throw new BadRequestException(
                 HttpResponseStatus.INTERNAL_SERVER_ERROR,
-                "Failed to save the UIDMeta to storage", 
+                "Failed to save the UIDMeta to storage",
                 "This may be caused by another process modifying storage data");
           }
-          
+
           return UIDMeta.getUIDMeta(tsdb, meta.getType(), meta.getUID());
         }
-        
+
       }
-      
+
       try {
-        final Deferred<UIDMeta> process_meta = meta.syncToStorage(tsdb, 
+        final Deferred<UIDMeta> process_meta = meta.syncToStorage(tsdb,
             method == HttpMethod.PUT).addCallbackDeferring(new SyncCB());
         final UIDMeta updated_meta = process_meta.joinUninterruptibly();
         tsdb.indexUIDMeta(updated_meta);
@@ -213,40 +216,40 @@ final class UniqueIdRpc implements HttpRpc {
       } catch (IllegalArgumentException e) {
         throw new BadRequestException(e);
       } catch (NoSuchUniqueId e) {
-        throw new BadRequestException(HttpResponseStatus.NOT_FOUND, 
+        throw new BadRequestException(HttpResponseStatus.NOT_FOUND,
             "Could not find the requested UID", e);
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
-    // DELETE    
+    // DELETE
     } else if (method == HttpMethod.DELETE) {
-      
+
       final UIDMeta meta;
       if (query.hasContent()) {
         meta = query.serializer().parseUidMetaV1();
       } else {
         meta = this.parseUIDMetaQS(query);
       }
-      try {        
+      try {
         meta.delete(tsdb).joinUninterruptibly();
         tsdb.deleteUIDMeta(meta);
       } catch (IllegalArgumentException e) {
         throw new BadRequestException("Unable to delete UIDMeta information", e);
       } catch (NoSuchUniqueId e) {
-        throw new BadRequestException(HttpResponseStatus.NOT_FOUND, 
+        throw new BadRequestException(HttpResponseStatus.NOT_FOUND,
             "Could not find the requested UID", e);
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
       query.sendStatusOnly(HttpResponseStatus.NO_CONTENT);
-      
+
     } else {
-      throw new BadRequestException(HttpResponseStatus.METHOD_NOT_ALLOWED, 
+      throw new BadRequestException(HttpResponseStatus.METHOD_NOT_ALLOWED,
           "Method not allowed", "The HTTP method [" + method.getName() +
           "] is not permitted for this endpoint");
     }
   }
-  
+
   /**
    * Handles CRUD calls to individual TSMeta data entries
    * @param tsdb The TSDB from the RPC router
@@ -257,7 +260,7 @@ final class UniqueIdRpc implements HttpRpc {
     final HttpMethod method = query.getAPIMethod();
     // GET
     if (method == HttpMethod.GET) {
-      
+
       String tsuid = null;
       if (query.hasQueryStringParam("tsuid")) {
         tsuid = query.getQueryStringParam("tsuid");
@@ -268,11 +271,11 @@ final class UniqueIdRpc implements HttpRpc {
           } else {
             throw new BadRequestException(HttpResponseStatus.NOT_FOUND,
                 "Could not find Timeseries meta data");
-          } 
+          }
         } catch (NoSuchUniqueName e) {
-          // this would only happen if someone deleted a UID but left the 
+          // this would only happen if someone deleted a UID but left the
           // the timeseries meta data
-          throw new BadRequestException(HttpResponseStatus.NOT_FOUND, 
+          throw new BadRequestException(HttpResponseStatus.NOT_FOUND,
               "Unable to find one of the UIDs", e);
         } catch (BadRequestException e) {
           throw e;
@@ -297,7 +300,7 @@ final class UniqueIdRpc implements HttpRpc {
               .joinUninterruptibly();
           query.sendReply(query.serializer().formatTSMetaListV1(tsmetas));
         } catch (NoSuchUniqueName e) {
-          throw new BadRequestException(HttpResponseStatus.NOT_FOUND, 
+          throw new BadRequestException(HttpResponseStatus.NOT_FOUND,
               "Unable to find one of the UIDs", e);
         } catch (BadRequestException e) {
           throw e;
@@ -316,7 +319,7 @@ final class UniqueIdRpc implements HttpRpc {
       } else {
         meta = this.parseTSMetaQS(query);
       }
-      
+
       /**
        * Storage callback used to determine if the storage call was successful
        * or not. Also returns the updated object from storage.
@@ -344,15 +347,15 @@ final class UniqueIdRpc implements HttpRpc {
         final boolean create = query.getQueryStringParam("create") != null
             && query.getQueryStringParam("create").equals("true");
         final String tsuid = getTSUIDForMetric(metric, tsdb);
-        
+
         class WriteCounterIfNotPresentCB implements Callback<Boolean, Boolean> {
 
           @Override
           public Boolean call(Boolean exists) throws Exception {
             if (!exists && create) {
-              final PutRequest put = new PutRequest(tsdb.metaTable(), 
-                  UniqueId.stringToUid(tsuid), TSMeta.FAMILY(), 
-                  TSMeta.COUNTER_QUALIFIER(), Bytes.fromLong(0));    
+              final PutRequest put = new PutRequest(tsdb.metaTable(),
+                  UniqueId.stringToUid(tsuid), TSMeta.FAMILY(),
+                  TSMeta.COUNTER_QUALIFIER(), Bytes.fromLong(0));
               tsdb.getClient().put(put);
             }
 
@@ -368,7 +371,7 @@ final class UniqueIdRpc implements HttpRpc {
               .joinUninterruptibly();
           // set TSUID
           meta.setTSUID(tsuid);
-          
+
           if (!exists && create) {
             // Write 0 to counter column if not present
             TSMeta.counterExistsInStorage(tsdb, UniqueId.stringToUid(tsuid))
@@ -425,9 +428,9 @@ final class UniqueIdRpc implements HttpRpc {
           throw new RuntimeException(e);
         }
       }
-    // DELETE  
+    // DELETE
     } else if (method == HttpMethod.DELETE) {
-      
+
       final TSMeta meta;
       if (query.hasContent()) {
         meta = query.serializer().parseTSMetaV1();
@@ -442,12 +445,12 @@ final class UniqueIdRpc implements HttpRpc {
       }
       query.sendStatusOnly(HttpResponseStatus.NO_CONTENT);
     } else {
-      throw new BadRequestException(HttpResponseStatus.METHOD_NOT_ALLOWED, 
+      throw new BadRequestException(HttpResponseStatus.METHOD_NOT_ALLOWED,
           "Method not allowed", "The HTTP method [" + method.getName() +
           "] is not permitted for this endpoint");
     }
   }
-  
+
   /**
    * Used with verb overrides to parse out values from a query string
    * @param query The query to parse
@@ -463,20 +466,84 @@ final class UniqueIdRpc implements HttpRpc {
     if (display_name != null) {
       meta.setDisplayName(display_name);
     }
-    
+
     final String description = query.getQueryStringParam("description");
     if (description != null) {
       meta.setDescription(description);
     }
-    
+
     final String notes = query.getQueryStringParam("notes");
     if (notes != null) {
       meta.setNotes(notes);
     }
-    
+
     return meta;
   }
-  
+
+  /**
+   * Rename UID to a new name of the given metric, tagk or tagv names
+   * <p>
+   * This handler supports GET and POST whereby the GET command can parse query
+   * strings with the {@code type} and {@code name} as their parameters.
+   * <p>
+   * @param tsdb The TSDB from the RPC router
+   * @param query The query for this request
+   */
+  private void handleRename(final TSDB tsdb, final HttpQuery query) {
+    // only accept GET and POST
+    if (query.method() != HttpMethod.GET && query.method() != HttpMethod.POST) {
+      throw new BadRequestException(HttpResponseStatus.METHOD_NOT_ALLOWED,
+          "Method not allowed", "The HTTP method[" + query.method().getName() +
+          "] is not permitted for this endpoint");
+    }
+
+    final HashMap<String, String> source;
+    if (query.method() == HttpMethod.POST) {
+      source = query.serializer().parseUidRenameV1();
+    } else {
+      source = new HashMap<String, String>(3);
+      final String[] types = {"metric", "tagk", "tagv", "name"};
+      for (int i = 0; i < types.length; i++) {
+        final String value = query.getQueryStringParam(types[i]);
+        if (value!= null && !value.isEmpty()) {
+          source.put(types[i], value);
+        }
+      }
+    }
+    String type = null;
+    String oldname = null;
+    String newname = null;
+    for (Map.Entry<String, String> entry : source.entrySet()) {
+      if (entry.getKey().equals("name")) {
+        newname = entry.getValue();
+      } else {
+        type = entry.getKey();
+        oldname = entry.getValue();
+      }
+    }
+
+    // we need a type/value and new name
+    if (type == null || oldname == null || newname == null) {
+      throw new BadRequestException("Missing necessary values to rename UID");
+    }
+
+    HashMap<String, String> response = new HashMap<String, String>(2);
+    try {
+      tsdb.renameUid(type, oldname, newname);
+      response.put("result", "true");
+    } catch (IllegalArgumentException e) {
+      response.put("result", "false");
+      response.put("error", e.getMessage());
+    }
+
+    if (!response.containsKey("error")) {
+      query.sendReply(query.serializer().formatUidRenameV1(response));
+    } else {
+      query.sendReply(HttpResponseStatus.BAD_REQUEST,
+          query.serializer().formatUidRenameV1(response));
+    }
+  }
+
   /**
    * Used with verb overrides to parse out values from a query string
    * @param query The query to parse
@@ -487,32 +554,32 @@ final class UniqueIdRpc implements HttpRpc {
   private TSMeta parseTSMetaQS(final HttpQuery query) {
     final String tsuid = query.getRequiredQueryStringParam("tsuid");
     final TSMeta meta = new TSMeta(tsuid);
-    
+
     final String display_name = query.getQueryStringParam("display_name");
     if (display_name != null) {
       meta.setDisplayName(display_name);
     }
-  
+
     final String description = query.getQueryStringParam("description");
     if (description != null) {
       meta.setDescription(description);
     }
-    
+
     final String notes = query.getQueryStringParam("notes");
     if (notes != null) {
       meta.setNotes(notes);
     }
-    
+
     final String units = query.getQueryStringParam("units");
     if (units != null) {
       meta.setUnits(units);
     }
-    
+
     final String data_type = query.getQueryStringParam("data_type");
     if (data_type != null) {
       meta.setDataType(data_type);
     }
-    
+
     final String retention = query.getQueryStringParam("retention");
     if (retention != null && !retention.isEmpty()) {
       try {
@@ -521,7 +588,7 @@ final class UniqueIdRpc implements HttpRpc {
         throw new BadRequestException("Unable to parse 'retention' value");
       }
     }
-    
+
     final String max = query.getQueryStringParam("max");
     if (max != null && !max.isEmpty()) {
       try {
@@ -530,7 +597,7 @@ final class UniqueIdRpc implements HttpRpc {
         throw new BadRequestException("Unable to parse 'max' value");
       }
     }
-    
+
     final String min = query.getQueryStringParam("min");
     if (min != null && !min.isEmpty()) {
       try {
@@ -539,7 +606,7 @@ final class UniqueIdRpc implements HttpRpc {
         throw new BadRequestException("Unable to parse 'min' value");
       }
     }
-    
+
     return meta;
   }
 
@@ -554,7 +621,7 @@ final class UniqueIdRpc implements HttpRpc {
     if (query_string == null || query_string.isEmpty()) {
       throw new BadRequestException("The query string was empty");
     }
-    
+
     // m is of the following forms:
     // metric[{tag=value,...}]
     // where the parts in square brackets `[' .. `]' are optional.
@@ -568,7 +635,7 @@ final class UniqueIdRpc implements HttpRpc {
     final TreeMap<String, String> sortedTags = new TreeMap<String, String>(tags);
     // Byte Buffer to generate TSUID, pre allocated to the size of the TSUID
     final ByteArrayOutputStream buf = new ByteArrayOutputStream(
-        TSDB.metrics_width() + sortedTags.size() * 
+        TSDB.metrics_width() + sortedTags.size() *
         (TSDB.tagk_width() + TSDB.tagv_width()));
     try {
     buf.write(tsdb.getUID(UniqueIdType.METRIC, metric));
@@ -580,8 +647,8 @@ final class UniqueIdRpc implements HttpRpc {
       throw new BadRequestException(e);
     }
     final String tsuid = UniqueId.uidToString(buf.toByteArray());
-    
+
     return tsuid;
   }
-  
+
 }
