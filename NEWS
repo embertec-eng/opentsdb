@@ -1,5 +1,10 @@
 OpenTSDB - User visible changes.
 
+* Version 2.1.1.1 (2015-10-08)
+
+Changes:
+  - Backport /api/uid/rename from next to master branch
+
 * Version 2.1.1 (2015-09-12)
 
 Bug Fixes:
