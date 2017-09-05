@@ -18,31 +18,45 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import net.opentsdb.query.filter.TagVFilter;
+import net.opentsdb.query.filter.TagVLiteralOrFilter;
+import net.opentsdb.query.filter.TagVLiteralOrFilter.TagVILiteralOrFilter;
+import net.opentsdb.query.filter.TagVRegexFilter;
+import net.opentsdb.query.filter.TagVWildcardFilter;
 import net.opentsdb.storage.MockBase;
+import net.opentsdb.uid.FailedToAssignUniqueIdException;
 import net.opentsdb.uid.NoSuchUniqueId;
 import net.opentsdb.uid.NoSuchUniqueName;
 import net.opentsdb.uid.UniqueId;
 import net.opentsdb.utils.Config;
 import net.opentsdb.utils.Pair;
 
+import org.hbase.async.Bytes;
 import org.hbase.async.DeleteRequest;
 import org.hbase.async.GetRequest;
 import org.hbase.async.HBaseClient;
 import org.hbase.async.KeyValue;
 import org.hbase.async.PutRequest;
+import org.hbase.async.Bytes.ByteMap;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.powermock.api.mockito.PowerMockito;
 import org.powermock.core.classloader.annotations.PowerMockIgnore;
 import org.powermock.core.classloader.annotations.PrepareForTest;
 import org.powermock.modules.junit4.PowerMockRunner;
 
 import com.stumbleupon.async.Deferred;
+import com.stumbleupon.async.DeferredGroupException;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Matchers.anyString;
+import static org.mockito.Matchers.anyMapOf;
+import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.when;
 import static org.powermock.api.mockito.PowerMockito.mock;
 
@@ -51,7 +65,8 @@ import static org.powermock.api.mockito.PowerMockito.mock;
   "com.sum.*", "org.xml.*"})
 @RunWith(PowerMockRunner.class)
 @PrepareForTest({TSDB.class, Config.class, UniqueId.class, HBaseClient.class, 
-  GetRequest.class, PutRequest.class, DeleteRequest.class, KeyValue.class})
+  GetRequest.class, PutRequest.class, DeleteRequest.class, KeyValue.class, 
+  Const.class})
 public final class TestTags {
   private TSDB tsdb;
   private Config config;
@@ -377,6 +392,121 @@ public final class TestTags {
   }
   
   @Test
+  public void parseWithMetricAndFilters() {
+    final List<TagVFilter> filters = new ArrayList<TagVFilter>();
+    String metric = Tags.parseWithMetricAndFilters("sys.cpu.user", filters);
+    assertEquals("sys.cpu.user", metric);
+    assertEquals(0, filters.size());
+    
+    filters.clear();
+    metric = Tags.parseWithMetricAndFilters("sys.cpu.user{host=web01}", filters);
+    assertEquals("sys.cpu.user", metric);
+    assertEquals(1, filters.size());
+    assertEquals("host", filters.get(0).getTagk());
+    assertTrue(filters.get(0).isGroupBy());
+    assertTrue(filters.get(0) instanceof TagVLiteralOrFilter);
+    
+    filters.clear();
+    metric = Tags.parseWithMetricAndFilters("sys.cpu.user{host=*}", filters);
+    assertEquals("sys.cpu.user", metric);
+    assertEquals(1, filters.size());
+    assertEquals("host", filters.get(0).getTagk());
+    assertTrue(filters.get(0).isGroupBy());
+    assertTrue(filters.get(0) instanceof TagVWildcardFilter);
+    
+    filters.clear();
+    metric = Tags.parseWithMetricAndFilters("sys.cpu.user{host=web01}{}", filters);
+    assertEquals("sys.cpu.user", metric);
+    assertEquals(1, filters.size());
+    assertEquals("host", filters.get(0).getTagk());
+    assertTrue(filters.get(0).isGroupBy());
+    assertTrue(filters.get(0) instanceof TagVLiteralOrFilter);
+    
+    filters.clear();
+    metric = Tags.parseWithMetricAndFilters(
+        "sys.cpu.user{host=*,owner=regexp(.*ob)}", filters);
+    assertEquals("sys.cpu.user", metric);
+    assertEquals(2, filters.size());
+    for (final TagVFilter filter : filters) {
+      if (filter instanceof TagVWildcardFilter) {
+        assertEquals("host", filter.getTagk());
+      } else if (filter instanceof TagVRegexFilter) {
+        assertEquals("owner", filter.getTagk());
+      }
+      assertTrue(filter.isGroupBy());
+    }
+    
+    filters.clear();
+    metric = Tags.parseWithMetricAndFilters("sys.cpu.user{}{host=web01}", filters);
+    assertEquals("sys.cpu.user", metric);
+    assertEquals(1, filters.size());
+    assertEquals("host", filters.get(0).getTagk());
+    assertFalse(filters.get(0).isGroupBy());
+    assertTrue(filters.get(0) instanceof TagVLiteralOrFilter);
+    
+    filters.clear();
+    metric = Tags.parseWithMetricAndFilters(
+        "sys.cpu.user{}{host=iliteral_or(web01|Web02)}", filters);
+    assertEquals("sys.cpu.user", metric);
+    assertEquals(1, filters.size());
+    assertEquals("host", filters.get(0).getTagk());
+    assertFalse(filters.get(0).isGroupBy());
+    assertTrue(filters.get(0) instanceof TagVILiteralOrFilter);
+    
+    filters.clear();
+    metric = Tags.parseWithMetricAndFilters(
+        "sys.cpu.user{}{host=iliteral_or(web01|Web02),owner=*}", filters);
+    assertEquals("sys.cpu.user", metric);
+    assertEquals(2, filters.size());
+    for (final TagVFilter filter : filters) {
+      if (filter instanceof TagVWildcardFilter) {
+        assertEquals("owner", filter.getTagk());
+      } else if (filter instanceof TagVILiteralOrFilter) {
+        assertEquals("host", filter.getTagk());
+      }
+      assertFalse(filter.isGroupBy());
+    }
+    
+    filters.clear();
+    metric = Tags.parseWithMetricAndFilters(
+        "sys.cpu.user{host=iliteral_or(web01|Web02)}{owner=*}", filters);
+    assertEquals("sys.cpu.user", metric);
+    System.out.println(filters);
+    assertEquals(2, filters.size());
+    for (final TagVFilter filter : filters) {
+      if (filter instanceof TagVWildcardFilter) {
+        assertEquals("owner", filter.getTagk());
+        assertFalse(filter.isGroupBy());
+      } else if (filter instanceof TagVILiteralOrFilter) {
+        assertEquals("host", filter.getTagk());
+        assertTrue(filter.isGroupBy());
+      }
+    }
+  }
+
+  @Test (expected = IllegalArgumentException.class)
+  public void parseWithMetricAndFiltersMissingTrailingCurly() {
+    final List<TagVFilter> filters = new ArrayList<TagVFilter>();
+    Tags.parseWithMetricAndFilters("sys.cpu.user{}{host=web01", filters);
+  }
+  
+  @Test (expected = IllegalArgumentException.class)
+  public void parseWithMetricAndFiltersNullString() {
+    final List<TagVFilter> filters = new ArrayList<TagVFilter>();
+    Tags.parseWithMetricAndFilters(null, filters);
+  }
+  
+  @Test (expected = IllegalArgumentException.class)
+  public void parseWithMetricAndFiltersEmptyString() {
+    final List<TagVFilter> filters = new ArrayList<TagVFilter>();
+    Tags.parseWithMetricAndFilters("", filters);
+  }
+  
+  @Test (expected = IllegalArgumentException.class)
+  public void parseWithMetricAndFiltersNullFilters() {
+    Tags.parseWithMetricAndFilters("sys.cpu.user{}{host=web01}", null);
+  }
+  @Test
   public void parseSuccessful() {
     final HashMap<String, String> tags = new HashMap<String, String>(2);
     Tags.parse(tags, "foo=bar");
@@ -631,6 +761,32 @@ public final class TestTags {
     Tags.resolveOrCreateAll(tsdb, tags);
   }
   
+  @Test
+  public void resolveOrCreateAllAsync() throws Exception {
+    setupStorage();
+    setupResolveAll();
+    
+    final Map<String, String> tags = new HashMap<String, String>(1);
+    tags.put("host", "nohost");
+    final List<byte[]> uids = Tags.resolveOrCreateAllAsync(tsdb, "metric", tags).join();
+    assertEquals(1, uids.size());
+    assertArrayEquals(new byte[] { 0, 0, 1, 0, 0, 3}, uids.get(0));
+  }
+  
+  @Test (expected = DeferredGroupException.class)
+  public void resolveOrCreateAllAsyncFilterBlocked() throws Exception {
+    setupStorage();
+    setupResolveAll();
+    when(tag_names.getOrCreateIdAsync(eq("host"), anyString(), 
+        anyMapOf(String.class, String.class)))
+      .thenReturn(Deferred.<byte[]>fromError(new FailedToAssignUniqueIdException(
+          "tagk", "host", 0, "Blocked by UID filter.")));
+    
+    final Map<String, String> tags = new HashMap<String, String>(1);
+    tags.put("host", "nohost");
+    Tags.resolveOrCreateAllAsync(tsdb, "metric", tags).join();
+  }
+  
   // PRIVATE helpers to setup unit tests
   
   private void setupStorage() throws Exception {
@@ -674,18 +830,132 @@ public final class TestTags {
   }
   
   private void setupResolveAll() throws Exception {
-    when(tag_names.getOrCreateId("host")).thenReturn(new byte[] { 0, 0, 1 });
-    when(tag_names.getOrCreateId("doesnotexist"))
+    when(tag_names.getOrCreateId(eq("host")))
+      .thenReturn(new byte[] { 0, 0, 1 });
+    when(tag_names.getOrCreateIdAsync(eq("host"), anyString(), 
+        anyMapOf(String.class, String.class)))
+      .thenReturn(Deferred.fromResult(new byte[] { 0, 0, 1 }));
+    when(tag_names.getOrCreateId(eq("doesnotexist")))
       .thenReturn(new byte[] { 0, 0, 3 });
+    when(tag_names.getOrCreateIdAsync(eq("doesnotexist"), anyString(), 
+        anyMapOf(String.class, String.class)))
+      .thenReturn(Deferred.fromResult(new byte[] { 0, 0, 3 }));
     when(tag_names.getId("pop")).thenReturn(new byte[] { 0, 0, 2 });
     when(tag_names.getId("nonesuch"))
       .thenThrow(new NoSuchUniqueName("tagv", "nonesuch"));
     
-    when(tag_values.getOrCreateId("web01")).thenReturn(new byte[] { 0, 0, 1 });
-    when(tag_values.getOrCreateId("nohost"))
-      .thenReturn(new byte[] { 0, 0, 3 });
+    when(tag_values.getOrCreateId(eq("web01")))
+      .thenReturn(new byte[] { 0, 0, 1 });
+    when(tag_values.getOrCreateIdAsync(eq("web01"), anyString(), 
+        anyMapOf(String.class, String.class)))
+      .thenReturn(Deferred.fromResult(new byte[] { 0, 0, 1 }));
+    when(tag_values.getOrCreateId(eq("nohost")))
+    .thenReturn(new byte[] { 0, 0, 3 });
+    when(tag_values.getOrCreateIdAsync(eq("nohost"), anyString(), 
+        anyMapOf(String.class, String.class)))
+      .thenReturn(Deferred.fromResult(new byte[] { 0, 0, 3 }));
     when(tag_values.getId("web02")).thenReturn(new byte[] { 0, 0, 2 });
     when(tag_values.getId("invalidhost"))
       .thenThrow(new NoSuchUniqueName("tagk", "invalidhost"));
+  }
+
+  @Test
+  public void getTagUids() throws Exception {
+    byte[] row = new byte[] { 0, 0, 1,  0x50, (byte)0xE2, 0x27, 0, 
+        0, 0, 1, 0, 0, 2};
+    ByteMap<byte[]> uids = Tags.getTagUids(row);
+    assertEquals(1, uids.size());
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 1 }, uids.firstKey()));
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 2 }, uids.firstEntry()
+        .getValue()));
+    
+    row = new byte[] { 0, 0, 1,  0x50, (byte)0xE2, 0x27, 0, 
+       0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0, 4};
+    uids = Tags.getTagUids(row);
+    assertEquals(2, uids.size());
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 1 }, uids.firstKey()));
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 2 }, uids.firstEntry()
+        .getValue()));
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 3 }, uids.lastKey()));
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 4 }, uids.lastEntry()
+        .getValue()));
+    
+    PowerMockito.mockStatic(Const.class);
+    PowerMockito.when(Const.SALT_WIDTH()).thenReturn(1);
+    
+    row = new byte[] { 1, 0, 0, 1,  0x50, (byte)0xE2, 0x27, 0, 
+        0, 0, 1, 0, 0, 2};
+    uids = Tags.getTagUids(row);
+    assertEquals(1, uids.size());
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 1 }, uids.firstKey()));
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 2 }, uids.firstEntry()
+        .getValue()));
+    
+    row = new byte[] { 1, 0, 0, 1,  0x50, (byte)0xE2, 0x27, 0, 
+       0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0, 4};
+    uids = Tags.getTagUids(row);
+    assertEquals(2, uids.size());
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 1 }, uids.firstKey()));
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 2 }, uids.firstEntry()
+        .getValue()));
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 3 }, uids.lastKey()));
+    assertEquals(0, Bytes.memcmp(new byte[] { 0, 0, 4 }, uids.lastEntry()
+        .getValue()));
+  }
+  
+  @Test (expected = ArrayIndexOutOfBoundsException.class)
+  public void getTagUidsMissingTagV() throws Exception {
+    byte[] row = new byte[] { 0, 0, 1,  0x50, (byte)0xE2, 0x27, 0, 0, 0, 1 };
+    Tags.getTagUids(row);
+  }
+  
+  @Test (expected = ArrayIndexOutOfBoundsException.class)
+  public void getTagUidsMissingTagVSalted() throws Exception {
+    PowerMockito.mockStatic(Const.class);
+    PowerMockito.when(Const.SALT_WIDTH()).thenReturn(1);
+    
+    byte[] row = new byte[] { 1, 0, 0, 1,  0x50, (byte)0xE2, 0x27, 0, 0, 0, 1 };
+    Tags.getTagUids(row);
+  }
+  
+  @Test
+  public void getTagUidsMissingTags() throws Exception {
+    byte[] row = new byte[] { 0, 0, 1,  0x50, (byte)0xE2, 0x27, 0 };
+    ByteMap<byte[]> uids = Tags.getTagUids(row);
+    assertEquals(0, uids.size());
+    
+    PowerMockito.mockStatic(Const.class);
+    PowerMockito.when(Const.SALT_WIDTH()).thenReturn(1);
+    
+    row = new byte[] { 1, 0, 0, 1,  0x50, (byte)0xE2, 0x27, 0 };
+    uids = Tags.getTagUids(row);
+    assertEquals(0, uids.size());
+  }
+  
+  @Test (expected = NullPointerException.class)
+  public void getTagUidsNullRow() throws Exception {
+    Tags.getTagUids(null);
+  }
+  
+  @Test
+  public void getTagUidsEmptyRow() throws Exception {
+    final ByteMap<byte[]> uids = Tags.getTagUids(new byte[] {});
+    assertEquals(0, uids.size());
+  }
+
+  @Test
+  public void setAllowSpecialChars() throws Exception {
+    assertFalse(Tags.isAllowSpecialChars('!'));
+
+    Tags.setAllowSpecialChars(null);
+    assertFalse(Tags.isAllowSpecialChars('!'));
+
+    Tags.setAllowSpecialChars("");
+    assertFalse(Tags.isAllowSpecialChars('!'));
+
+    Tags.setAllowSpecialChars("!)(%");
+    assertTrue(Tags.isAllowSpecialChars('!'));
+    assertTrue(Tags.isAllowSpecialChars('('));
+    assertTrue(Tags.isAllowSpecialChars('%'));
   }
 }

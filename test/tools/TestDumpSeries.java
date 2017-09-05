@@ -14,7 +14,6 @@ package net.opentsdb.tools;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
-import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.when;
 import static org.powermock.api.mockito.PowerMockito.mock;
 
@@ -24,6 +23,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 
+import net.opentsdb.core.AppendDataPoints;
 import net.opentsdb.core.TSDB;
 import net.opentsdb.meta.Annotation;
 import net.opentsdb.storage.MockBase;
@@ -31,8 +31,8 @@ import net.opentsdb.uid.NoSuchUniqueName;
 import net.opentsdb.uid.UniqueId;
 import net.opentsdb.utils.Config;
 
-import org.apache.zookeeper.proto.DeleteRequest;
 import org.hbase.async.Bytes;
+import org.hbase.async.DeleteRequest;
 import org.hbase.async.GetRequest;
 import org.hbase.async.HBaseClient;
 import org.hbase.async.KeyValue;
@@ -42,7 +42,6 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.powermock.api.mockito.PowerMockito;
 import org.powermock.core.classloader.annotations.PowerMockIgnore;
 import org.powermock.core.classloader.annotations.PrepareForTest;
 import org.powermock.modules.junit4.PowerMockRunner;
@@ -85,10 +84,8 @@ public class TestDumpSeries {
 
   @Before
   public void before() throws Exception {
-    PowerMockito.whenNew(HBaseClient.class)
-      .withArguments(anyString(), anyString()).thenReturn(client);
     config = new Config(false);
-    tsdb = new TSDB(config);
+    tsdb = new TSDB(client, config);
     
     storage = new MockBase(tsdb, client, true, true, true, true);
     storage.setFamily("t".getBytes(MockBase.ASCII()));
@@ -316,7 +313,18 @@ public class TestDumpSeries {
     assertEquals("sys.cpu.user 1356998400004 6 host=web01", log_lines[1]);
     assertEquals("sys.cpu.user 1356998400008 5 host=web01", log_lines[2]);
   }
-  
+
+  @Test
+  public void dumpImportAppendDataPoints() throws Exception {
+    writeAppendDataPoints();
+    doDump.invoke(null, tsdb, client, "tsdb".getBytes(MockBase.ASCII()), false,
+        true, new String[] { "1356998400", "1357002000", "sum", "sys.cpu.user" });
+    final String[] log_lines = buffer.toString("ISO-8859-1").split("\n");
+    assertNotNull(log_lines);
+    assertEquals("sys.cpu.user 1356998402 42 host=web01", log_lines[0]);
+    assertEquals("sys.cpu.user 1356998404 6 host=web01", log_lines[1]);
+  }
+
   @Test
   public void dumpRawCompactedAndDelete() throws Exception {
     writeCompactedData();
@@ -400,5 +408,12 @@ public class TestDumpSeries {
 //    final byte[] qual12 = MockBase.concatByteArrays(qual1, qual2);
 //    kvs.add(makekv(qual12, MockBase.concatByteArrays(val1, val2, ZERO)));
 
+  }
+
+  private void writeAppendDataPoints() throws Exception {
+    storage.addColumn(MockBase.stringToBytes("00000150E22700000001000001"),
+        "t".getBytes(MockBase.ASCII()),
+        AppendDataPoints.APPEND_COLUMN_QUALIFIER,
+        new byte[] { 0, 0x20, 42, 0, 0x40, 6 });
   }
 }

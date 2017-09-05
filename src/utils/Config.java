@@ -72,7 +72,13 @@ public class Config {
   
   /** tsd.storage.enable_compaction */
   private boolean enable_compactions = true;
-
+  
+  /** tsd.storage.enable_appends */
+  private boolean enable_appends = false;
+  
+  /** tsd.storage.repair_appends */
+  private boolean repair_appends = false;
+  
   /** tsd.core.meta.enable_realtime_ts */
   private boolean enable_realtime_ts = false;
   
@@ -87,7 +93,7 @@ public class Config {
   
   /** tsd.http.request.enable_chunked */
   private boolean enable_chunked_requests = false;
-
+  
   /** tsd.storage.fix_duplicates */
   private boolean fix_duplicates = false;
 
@@ -96,6 +102,9 @@ public class Config {
   
   /** tsd.core.tree.enable_processing */
   private boolean enable_tree_processing = false;
+
+  /** tsd.storage.hbase.scanner.maxNumRows */
+  private int scanner_max_num_rows = 128;
   
   /**
    * The list of properties configured to their defaults or modified by users
@@ -151,6 +160,11 @@ public class Config {
     setDefaults();
   }
 
+  /** @return The file that generated this config. May be null */
+  public String configLocation() {
+    return config_location;
+  }
+  
   /** @return the auto_metric value */
   public boolean auto_metric() {
     return auto_metric;
@@ -178,6 +192,17 @@ public class Config {
     return enable_compactions;
   }
   
+  /** @return whether or not to write data in the append format */
+  public boolean enable_appends() {
+    return enable_appends;
+  }
+  
+  /** @return whether or not to re-write appends with duplicates or out of order
+   * data when queried. */
+  public boolean repair_appends() {
+    return repair_appends;
+  }
+  
   /** @return whether or not to record new TSMeta objects in real time */
   public boolean enable_realtime_ts() { 
     return enable_realtime_ts;
@@ -197,6 +222,11 @@ public class Config {
   public boolean enable_tsuid_tracking() {
     return enable_tsuid_tracking;
   }
+
+  /** @return maximum number of rows to be fetched per round trip while scanning HBase */
+  public int scanner_maxNumRows() {
+    return scanner_max_num_rows;
+  }
   
   /** @return whether or not chunked requests are supported */
   public boolean enable_chunked_requests() {
@@ -207,7 +237,7 @@ public class Config {
   public int max_chunked_requests() {
     return max_chunked_requests;
   }
-
+  
   /** @return true if duplicate values should be fixed */
   public boolean fix_duplicates() {
     return fix_duplicates;
@@ -347,6 +377,9 @@ public class Config {
    */
   public final String getDirectoryName(final String property) {
     String directory = properties.get(property);
+    if (directory == null || directory.isEmpty()){
+      return null;
+    }
     if (IS_WINDOWS) {
       // Windows swings both ways. If a forward slash was already used, we'll
       // add one at the end if missing. Otherwise use the windows default of \
@@ -419,6 +452,20 @@ public class Config {
   public final Map<String, String> getMap() {
     return ImmutableMap.copyOf(properties);
   }
+
+  /**
+   * set enable_compactions to true
+   */
+  public final void enableCompactions() {
+    this.enable_compactions = true;
+  }
+
+  /**
+   * set enable_compactions to false
+   */
+  public final void disableCompactions() {
+    this.enable_compactions = false;
+  }
   
   /**
    * Loads default entries that were not provided by a file or command line
@@ -440,20 +487,33 @@ public class Config {
     default_map.put("tsd.core.auto_create_metrics", "false");
     default_map.put("tsd.core.auto_create_tagks", "true");
     default_map.put("tsd.core.auto_create_tagvs", "true");
+    default_map.put("tsd.core.connections.limit", "0");
+    default_map.put("tsd.core.enable_api", "true");
+    default_map.put("tsd.core.enable_ui", "true");
     default_map.put("tsd.core.meta.enable_realtime_ts", "false");
     default_map.put("tsd.core.meta.enable_realtime_uid", "false");
     default_map.put("tsd.core.meta.enable_tsuid_incrementing", "false");
     default_map.put("tsd.core.meta.enable_tsuid_tracking", "false");
+    default_map.put("tsd.core.meta.cache.enable", "false");
     default_map.put("tsd.core.plugin_path", "");
     default_map.put("tsd.core.socket.timeout", "0");
     default_map.put("tsd.core.tree.enable_processing", "false");
     default_map.put("tsd.core.preload_uid_cache", "false");
     default_map.put("tsd.core.preload_uid_cache.max_entries", "300000");
+    default_map.put("tsd.core.storage_exception_handler.enable", "false");
+    default_map.put("tsd.core.uid.random_metrics", "false");
+    default_map.put("tsd.query.filter.expansion_limit", "4096");
+    default_map.put("tsd.query.skip_unresolved_tagvs", "false");
+    default_map.put("tsd.query.allow_simultaneous_duplicates", "true");
+    default_map.put("tsd.query.enable_fuzzy_filter", "true");
     default_map.put("tsd.rtpublisher.enable", "false");
     default_map.put("tsd.rtpublisher.plugin", "");
     default_map.put("tsd.search.enable", "false");
     default_map.put("tsd.search.plugin", "");
     default_map.put("tsd.stats.canonical", "false");
+    default_map.put("tsd.startup.enable", "false");
+    default_map.put("tsd.startup.plugin", "");
+    default_map.put("tsd.storage.hbase.scanner.maxNumRows", "128");
     default_map.put("tsd.storage.fix_duplicates", "false");
     default_map.put("tsd.storage.flush_interval", "1000");
     default_map.put("tsd.storage.hbase.data_table", "tsdb");
@@ -462,14 +522,26 @@ public class Config {
     default_map.put("tsd.storage.hbase.meta_table", "tsdb-meta");
     default_map.put("tsd.storage.hbase.zk_quorum", "localhost");
     default_map.put("tsd.storage.hbase.zk_basedir", "/hbase");
+    default_map.put("tsd.storage.hbase.prefetch_meta", "false");
+    default_map.put("tsd.storage.enable_appends", "false");
+    default_map.put("tsd.storage.repair_appends", "false");
     default_map.put("tsd.storage.enable_compaction", "true");
+    default_map.put("tsd.storage.compaction.flush_interval", "10");
+    default_map.put("tsd.storage.compaction.min_flush_threshold", "100");
+    default_map.put("tsd.storage.compaction.max_concurrent_flushes", "10000");
+    default_map.put("tsd.storage.compaction.flush_speed", "2");
+    default_map.put("tsd.timeseriesfilter.enable", "false");
+    default_map.put("tsd.uidfilter.enable", "false");
+    default_map.put("tsd.core.stats_with_port", "false");    
     default_map.put("tsd.http.show_stack_trace", "true");
+    default_map.put("tsd.http.query.allow_delete", "false");
     default_map.put("tsd.http.request.enable_chunked", "false");
     default_map.put("tsd.http.request.max_chunk", "4096");
     default_map.put("tsd.http.request.cors_domains", "");
     default_map.put("tsd.http.request.cors_headers", "Authorization, "
       + "Content-Type, Accept, Origin, User-Agent, DNT, Cache-Control, "
       + "X-Mx-ReqToken, Keep-Alive, X-Requested-With, If-Modified-Since");
+    default_map.put("tsd.query.timeout", "0");
 
     for (Map.Entry<String, String> entry : default_map.entrySet()) {
       if (!properties.containsKey(entry.getKey()))
@@ -568,6 +640,8 @@ public class Config {
     auto_tagk = this.getBoolean("tsd.core.auto_create_tagks");
     auto_tagv = this.getBoolean("tsd.core.auto_create_tagvs");
     enable_compactions = this.getBoolean("tsd.storage.enable_compaction");
+    enable_appends = this.getBoolean("tsd.storage.enable_appends");
+    repair_appends = this.getBoolean("tsd.storage.repair_appends");
     enable_chunked_requests = this.getBoolean("tsd.http.request.enable_chunked");
     enable_realtime_ts = this.getBoolean("tsd.core.meta.enable_realtime_ts");
     enable_realtime_uid = this.getBoolean("tsd.core.meta.enable_realtime_uid");
@@ -580,6 +654,7 @@ public class Config {
     }
     enable_tree_processing = this.getBoolean("tsd.core.tree.enable_processing");
     fix_duplicates = this.getBoolean("tsd.storage.fix_duplicates");
+    scanner_max_num_rows = this.getInt("tsd.storage.hbase.scanner.maxNumRows");
   }
   
   /**

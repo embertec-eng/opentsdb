@@ -14,6 +14,9 @@ package tsd.client;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+
 import com.google.gwt.event.dom.client.BlurEvent;
 import com.google.gwt.event.dom.client.BlurHandler;
 import com.google.gwt.event.dom.client.ClickEvent;
@@ -50,6 +53,7 @@ final class MetricForm extends HorizontalPanel implements Focusable {
   private final CheckBox downsample = new CheckBox("Downsample");
   private final ListBox downsampler = new ListBox();
   private final ValidatedTextBox interval = new ValidatedTextBox();
+  private final ListBox fill_policy = new ListBox();
   private final CheckBox rate = new CheckBox("Rate");
   private final CheckBox rate_counter = new CheckBox("Rate Ctr");
   private final TextBox counter_max = new TextBox();
@@ -66,6 +70,7 @@ final class MetricForm extends HorizontalPanel implements Focusable {
     downsampler.addChangeHandler(handler);
     interval.addBlurHandler(handler);
     interval.addKeyPressHandler(handler);
+    fill_policy.addChangeHandler(handler);
     rate.addClickHandler(handler);
     rate_counter.addClickHandler(handler);
     counter_max.addBlurHandler(handler);
@@ -116,25 +121,63 @@ final class MetricForm extends HorizontalPanel implements Focusable {
       clearTags();
       return metric.substring(0, len - 2);
     }
-    // substring the tags out of "foo{a=b,...,x=y}" and parse them.
-    int i = 0;  // Tag index.
     final int num_tags_before = getNumTags();
-    for (final String tag : metric.substring(curly + 1, len - 1).split(",")) {
+    
+    final List<Filter> filters = new ArrayList<Filter>();
+    final int close = metric.indexOf('}');
+    int i = 0;
+    if (close != metric.length() - 1) { // "foo{...}{tagk=filter}" 
+      final int filter_bracket = metric.lastIndexOf('{');
+      for (final String filter : metric.substring(filter_bracket + 1, 
+          metric.length() - 1).split(",")) {
+        if (filter.isEmpty()) {
+          break;
+        }
+        final String[] kv = filter.split("=");
+        if (kv.length != 2 || kv[0].isEmpty() || kv[1].isEmpty()) {
+          continue;  // Invalid tag.
+        }
+        final Filter f = new Filter();
+        f.tagk = kv[0];
+        f.tagv = kv[1];
+        f.is_groupby = false;
+        filters.add(f);
+        i++;  
+      }
+    }
+    
+    i = 0;
+    for (final String tag : metric.substring(curly + 1, close).split(",")) {
+      if (tag.isEmpty() && close != metric.length() - 1){
+        break;
+      }
       final String[] kv = tag.split("=");
       if (kv.length != 2 || kv[0].isEmpty() || kv[1].isEmpty()) {
-        setTag(i, "", "");
         continue;  // Invalid tag.
       }
-      if (i < num_tags_before) {
-        setTag(i, kv[0], kv[1]);
-      } else {
-        addTag(kv[0], kv[1]);
-      }
+      final Filter f = new Filter();
+      f.tagk = kv[0];
+      f.tagv = kv[1];
+      f.is_groupby = true;
+      filters.add(f);
       i++;
     }
-    // Leave an empty line at the end.
+    if (!filters.isEmpty()) {
+      Collections.sort(filters);
+    }
+    
+    i = 0;
+    for (int x = filters.size() - 1; x >= 0; x--) {
+      final Filter filter = filters.get(x);
+      if (i < num_tags_before) {
+        setTag(i++, filter.tagk, filter.tagv, filter.is_groupby);
+      } else {
+        addTag(filter.tagk, filter.tagv, filter.is_groupby);
+      }
+    }
+    
     if (i < num_tags_before) {
-      setTag(i, "", "");
+      setTag(i, "", "", true);
     } else {
       addTag();
     }
@@ -144,6 +187,36 @@ final class MetricForm extends HorizontalPanel implements Focusable {
     }
     // Return the "foo" part of "foo{a=b,...,x=y}"
     return metric.substring(0, curly);
+    
+    /*
+    // substring the tags out of "foo{a=b,...,x=y}" and parse them.
+    int i = 0;  // Tag index.
+    final int num_tags_before = getNumTags();
+    for (final String tag : metric.substring(curly + 1, len - 1).split(",")) {
+      final String[] kv = tag.split("=");
+      if (kv.length != 2 || kv[0].isEmpty() || kv[1].isEmpty()) {
+        setTag(i, "", "", true);
+        continue;  // Invalid tag.
+      }
+      if (i < num_tags_before) {
+        setTag(i, kv[0], kv[1], true);
+      } else {
+        addTag(kv[0], kv[1]);
+      }
+      i++;
+    }
+    // Leave an empty line at the end.
+    if (i < num_tags_before) {
+      setTag(i, "", "", true);
+    } else {
+      addTag();
+    }
+    // Remove extra tags.
+    for (i++; i < num_tags_before; i++) {
+      tagtable.removeRow(i + 1);
+    }
+    // Return the "foo" part of "foo{a=b,...,x=y}"
+    return metric.substring(0, curly); */
   }
 
   public void updateFromQueryString(final String m, final String o) {
@@ -179,18 +252,38 @@ final class MetricForm extends HorizontalPanel implements Focusable {
 
     // downsampling function & interval.
     if (i > 0) {
-      final int dash = parts[1].indexOf('-', 1);  // 1st char can't be `-'.
-      if (dash < 0) {
+      // First dash should have been given.
+      final int first_dash = parts[1].indexOf('-', 1); // 1st char can't be `-'.
+      if (first_dash < 0) {
         disableDownsample();
         return;  // Invalid downsampling specifier.
       }
+
+      // Second dash (and subsequent fill policy) are optional.
+      final int second_dash = parts[1].indexOf('-', first_dash + 1);
+
       downsample.setValue(true, false);
 
       downsampler.setEnabled(true);
-      setSelectedItem(downsampler, parts[1].substring(dash + 1));
+      fill_policy.setEnabled(true);
+      if (-1 == second_dash) {
+        // No fill policy given.
+        setSelectedItem(downsampler, parts[1].substring(first_dash + 1));
+
+        // So use a default.
+        // TODO: don't assume this exists.
+        setSelectedItem(fill_policy, "lerp");
+      } else {
+        // User specified fill policy.
+        setSelectedItem(downsampler, parts[1].substring(first_dash + 1,
+          second_dash));
+
+        // So use what was given.
+        setSelectedItem(fill_policy, parts[1].substring(second_dash + 1));
+      }
 
       interval.setEnabled(true);
-      interval.setText(parts[1].substring(0, dash));
+      interval.setText(parts[1].substring(0, first_dash));
     } else {
       disableDownsample();
     }
@@ -202,6 +295,7 @@ final class MetricForm extends HorizontalPanel implements Focusable {
     downsample.setValue(false, false);
     interval.setEnabled(false);
     downsampler.setEnabled(false);
+    fill_policy.setEnabled(false);
   }
 
   public CheckBox x1y2() {
@@ -264,6 +358,7 @@ final class MetricForm extends HorizontalPanel implements Focusable {
         final HorizontalPanel hbox = new HorizontalPanel();
         hbox.add(downsampler);
         hbox.add(interval);
+        hbox.add(fill_policy);
         vbox.add(hbox);
       }
       add(vbox);
@@ -281,8 +376,17 @@ final class MetricForm extends HorizontalPanel implements Focusable {
       aggregators.addItem((String)agg);
       downsampler.addItem((String)agg);
     }
+ // TODO: don't assume we will get these.
     setSelectedItem(aggregators, "sum");
     setSelectedItem(downsampler, "avg");
+  }
+  
+  public void setFillPolicies(final List<String> policies) {
+    for (final String policy : policies) {
+      fill_policy.addItem(policy);
+    }
+    // TODO: don't assume we will get this.
+    setSelectedItem(fill_policy, "lerp");
   }
 
   public boolean buildQueryString(final StringBuilder url) {
@@ -294,14 +398,20 @@ final class MetricForm extends HorizontalPanel implements Focusable {
     url.append(selectedValue(aggregators));
     if (downsample.getValue()) {
       url.append(':').append(interval.getValue())
-        .append('-').append(selectedValue(downsampler));
+         .append('-').append(selectedValue(downsampler))
+         .append('-').append(selectedValue(fill_policy));
     }
     if (rate.getValue()) {
       url.append(":rate");
       if (rate_counter.getValue()) {
-        url.append('{').append("counter");
+        url.append('{');//.append("counter");
         final String max = counter_max.getValue().trim();
         final String reset = counter_reset_value.getValue().trim();
+        if (max.isEmpty() && (reset.equals("0") || reset.isEmpty())) {
+          url.append("dropcounter");
+        } else {
+          url.append("counter");
+        }
         if (max.length() > 0 && reset.length() > 0) {
           url.append(',').append(max).append(',').append(reset);
         } else if (max.length() > 0 && reset.length() == 0) {
@@ -313,24 +423,32 @@ final class MetricForm extends HorizontalPanel implements Focusable {
       }
     }
     url.append(':').append(metric);
-    {
-      final int ntags = getNumTags();
+    List<Filter> filters = getFilters(true);
+    if (!filters.isEmpty()) {
       url.append('{');
-      for (int tag = 0; tag < ntags; tag++) {
-        final String tagname = getTagName(tag);
-        final String tagvalue = getTagValue(tag);
-        if (tagname.isEmpty() || tagvalue.isEmpty()) {
-          continue;
+      for (int i = 0; i < filters.size(); i++) {
+        if (i > 0) {
+          url.append(",");
         }
-        url.append(tagname).append('=').append(tagvalue)
-          .append(',');
+        url.append(filters.get(i).tagk)
+           .append("=")
+           .append(filters.get(i).tagv);
       }
-      final int last = url.length() - 1;
-      if (url.charAt(last) == '{') {  // There was no tag.
-        url.setLength(last);          // So remove the `{'.
-      } else {  // Need to replace the last `,' with a `}'.
-        url.setCharAt(url.length() - 1, '}');
+      url.append('}');
+    }
+    // now the non-group bys
+    filters = getFilters(false);
+    if (!filters.isEmpty()) {
+      url.append('{');
+      for (int i = 0; i < filters.size(); i++) {
+        if (i > 0) {
+          url.append(",");
+        }
+        url.append(filters.get(i).tagk)
+           .append("=")
+           .append(filters.get(i).tagv);
       }
+      url.append('}');
     }
     url.append("&o=");
     if (x1y2.getValue()) {
@@ -338,7 +456,34 @@ final class MetricForm extends HorizontalPanel implements Focusable {
     }
     return true;
   }
-
+  
+  /**
+   * Helper method to extract the tags from the row set and sort them before
+   * sending to the API so that we avoid a bug wherein the sort order changes
+   * on reload.
+   * @param group_by Whether or not to fetch group by or non-group by filters.
+   * @return A non-null list of filters. May be empty.
+   */
+  private List<Filter> getFilters(final boolean group_by) {
+    final int ntags = getNumTags();
+    final List<Filter> filters = new ArrayList<Filter>(ntags);
+    for (int tag = 0; tag < ntags; tag++) {
+      final Filter filter = new Filter();
+      filter.tagk = getTagName(tag);
+      filter.tagv = getTagValue(tag);
+      filter.is_groupby = isTagGroupby(tag);
+      if (filter.tagk.isEmpty() || filter.tagv.isEmpty()) {
+        continue;
+      }
+      if (filter.is_groupby = group_by) {
+        filters.add(filter);
+      }
+    }
+    // sort on the tagk
+    Collections.sort(filters);
+    return filters;
+  }
+  
   private int getNumTags() {
     return tagtable.getRowCount() - 1;
   }
@@ -350,6 +495,10 @@ final class MetricForm extends HorizontalPanel implements Focusable {
   private String getTagValue(final int i) {
     return ((SuggestBox) tagtable.getWidget(i + 1, 2)).getValue();
   }
+  
+  private boolean isTagGroupby(final int i) {
+    return ((CheckBox) tagtable.getWidget(i + 1,  3)).getValue();
+  }
 
   private void setTagName(final int i, final String value) {
     ((SuggestBox) tagtable.getWidget(i + 1, 1)).setValue(value);
@@ -359,6 +508,10 @@ final class MetricForm extends HorizontalPanel implements Focusable {
     ((SuggestBox) tagtable.getWidget(i + 1, 2)).setValue(value);
   }
 
+  private void isTagGroupby(final int i, final boolean groupby) {
+    ((CheckBox) tagtable.getWidget(i + 1,  3)).setValue(groupby);
+  }
+  
   /**
    * Changes the name/value of an existing tag.
    * @param i The index of the tag to change.
@@ -366,27 +519,34 @@ final class MetricForm extends HorizontalPanel implements Focusable {
    * @param value The new value of the tag.
    * Requires: {@code i < getNumTags()}.
    */
-  private void setTag(final int i, final String name, final String value) {
+  private void setTag(final int i, final String name, final String value, 
+      final boolean groupby) {
     setTagName(i, name);
     setTagValue(i, value);
+    isTagGroupby(i, groupby);
   }
 
   private void addTag() {
-    addTag(null, null);
+    addTag(null, null, true);
   }
 
   private void addTag(final String default_tagname) {
-    addTag(default_tagname, null);
+    addTag(default_tagname, null, true);
   }
 
   private void addTag(final String default_tagname,
-                      final String default_value) {
+                      final String default_value,
+                      final boolean is_groupby) {
     final int row = tagtable.getRowCount();
-
+    
     final ValidatedTextBox tagname = new ValidatedTextBox();
     final SuggestBox suggesttagk = RemoteOracle.newSuggestBox("tagk", tagname);
     final ValidatedTextBox tagvalue = new ValidatedTextBox();
     final SuggestBox suggesttagv = RemoteOracle.newSuggestBox("tagv", tagvalue);
+    final CheckBox groupby = new CheckBox();
+    groupby.setValue(is_groupby);
+    groupby.setTitle("Group by");
+    groupby.addClickHandler(events_handler);
     tagname.setValidationRegexp(TSDB_ID_RE);
     tagvalue.setValidationRegexp(TSDB_TAGVALUE_RE);
     tagname.setWidth("100%");
@@ -400,6 +560,7 @@ final class MetricForm extends HorizontalPanel implements Focusable {
 
     tagtable.setWidget(row, 1, suggesttagk);
     tagtable.setWidget(row, 2, suggesttagv);
+    tagtable.setWidget(row, 3, groupby);
     if (row > 2) {
       final Button remove = new Button("x");
       remove.addClickHandler(removetag);
@@ -417,7 +578,7 @@ final class MetricForm extends HorizontalPanel implements Focusable {
   }
 
   private void clearTags() {
-    setTag(0, "", "");
+    setTag(0, "", "", true);
     for (int i = getNumTags() - 1; i > 1; i++) {
       tagtable.removeRow(i + 1);
     }
@@ -453,9 +614,10 @@ final class MetricForm extends HorizontalPanel implements Focusable {
         for (int tag = 1; tag < ntags; tag++) {
           final String tagname = getTagName(tag);
           final String tagvalue = getTagValue(tag);
-          setTag(tag - 1, tagname, tagvalue);
+          // todo - groupby
+          setTag(tag - 1, tagname, tagvalue, isTagGroupby(tag));
         }
-        setTag(ntags - 1, "", "");
+        setTag(ntags - 1, "", "", true);
       }
       // Try to remove empty lines from the tag table (but never remove the
       // first line or last line, even if they're empty).  Walk the table
@@ -496,6 +658,7 @@ final class MetricForm extends HorizontalPanel implements Focusable {
 
   private void setupDownsampleWidgets() {
     downsampler.setEnabled(false);
+    fill_policy.setEnabled(false);
     interval.setEnabled(false);
     interval.setMaxLength(5);
     interval.setVisibleLength(5);
@@ -505,6 +668,7 @@ final class MetricForm extends HorizontalPanel implements Focusable {
       public void onClick(final ClickEvent event) {
         final boolean checked = ((CheckBox) event.getSource()).getValue();
         downsampler.setEnabled(checked);
+        fill_policy.setEnabled(checked);
         interval.setEnabled(checked);
         if (checked) {
           downsampler.setFocus(true);
@@ -567,7 +731,7 @@ final class MetricForm extends HorizontalPanel implements Focusable {
 
     try {
       LocalRateOptions options = new LocalRateOptions();
-      options.is_counter = "counter".equals(parts[0]);
+      options.is_counter = parts[0].endsWith("counter");
       options.counter_max = (parts.length >= 2 && parts[1].length() > 0 ? Long
           .parseLong(parts[1]) : Long.MAX_VALUE);
       options.reset_value = (parts.length >= 3 && parts[2].length() > 0 ? Long
@@ -575,6 +739,21 @@ final class MetricForm extends HorizontalPanel implements Focusable {
       return options;
     } catch (NumberFormatException e) {
       return new LocalRateOptions();
+    }
+  }
+  
+  private static class Filter implements Comparable<Filter> {
+    String tagk;
+    String tagv;
+    boolean is_groupby;
+    
+    @Override
+    public int compareTo(final Filter filter) {
+      if (filter == this) {
+        return 0;
+      }
+      return tagk.compareTo(filter.tagk) +
+          tagv.compareTo(filter.tagv);
     }
   }
   

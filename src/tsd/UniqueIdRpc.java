@@ -22,6 +22,7 @@ import java.util.Map.Entry;
 import java.util.TreeMap;
 
 import org.hbase.async.Bytes;
+import org.hbase.async.Bytes.ByteMap;
 import org.hbase.async.PutRequest;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
@@ -297,7 +298,7 @@ final class UniqueIdRpc implements HttpRpc {
         final TSUIDQuery tsuid_query = new TSUIDQuery(tsdb, metric, tags);
         try {
           final List<TSMeta> tsmetas = tsuid_query.getTSMetas()
-          .joinUninterruptibly();
+              .joinUninterruptibly();
           query.sendReply(query.serializer().formatTSMetaListV1(tsmetas));
         } catch (NoSuchUniqueName e) {
           throw new BadRequestException(HttpResponseStatus.NOT_FOUND, 
@@ -452,6 +453,35 @@ final class UniqueIdRpc implements HttpRpc {
   }
   
   /**
+   * Used with verb overrides to parse out values from a query string
+   * @param query The query to parse
+   * @return An UIDMeta object with configured values
+   * @throws BadRequestException if a required value was missing or could not
+   * be parsed
+   */
+  private UIDMeta parseUIDMetaQS(final HttpQuery query) {
+    final String uid = query.getRequiredQueryStringParam("uid");
+    final String type = query.getRequiredQueryStringParam("type");
+    final UIDMeta meta = new UIDMeta(UniqueId.stringToUniqueIdType(type), uid);
+    final String display_name = query.getQueryStringParam("display_name");
+    if (display_name != null) {
+      meta.setDisplayName(display_name);
+    }
+    
+    final String description = query.getQueryStringParam("description");
+    if (description != null) {
+      meta.setDescription(description);
+    }
+    
+    final String notes = query.getQueryStringParam("notes");
+    if (notes != null) {
+      meta.setNotes(notes);
+    }
+    
+    return meta;
+  }
+  
+  /**
    * Rename UID to a new name of the given metric, tagk or tagv names
    * <p>
    * This handler supports GET and POST whereby the GET command can parse query
@@ -518,42 +548,18 @@ final class UniqueIdRpc implements HttpRpc {
   /**
    * Used with verb overrides to parse out values from a query string
    * @param query The query to parse
-   * @return An UIDMeta object with configured values
-   * @throws BadRequestException if a required value was missing or could not
-   * be parsed
-   */
-  private UIDMeta parseUIDMetaQS(final HttpQuery query) {
-    final String uid = query.getRequiredQueryStringParam("uid");
-    final String type = query.getRequiredQueryStringParam("type");
-    final UIDMeta meta = new UIDMeta(UniqueId.stringToUniqueIdType(type), uid);
-    final String display_name = query.getQueryStringParam("display_name");
-    if (display_name != null) {
-      meta.setDisplayName(display_name);
-    }
-    
-    final String description = query.getQueryStringParam("description");
-    if (description != null) {
-      meta.setDescription(description);
-    }
-    
-    final String notes = query.getQueryStringParam("notes");
-    if (notes != null) {
-      meta.setNotes(notes);
-    }
-    
-    return meta;
-  }
-  
-  /**
-   * Used with verb overrides to parse out values from a query string
-   * @param query The query to parse
    * @return An TSMeta object with configured values
    * @throws BadRequestException if a required value was missing or could not
    * be parsed
    */
   private TSMeta parseTSMetaQS(final HttpQuery query) {
-    final String tsuid = query.getRequiredQueryStringParam("tsuid");
-    final TSMeta meta = new TSMeta(tsuid);
+    final String tsuid = query.getQueryStringParam("tsuid");
+    final TSMeta meta;
+    if (tsuid != null && !tsuid.isEmpty()) {
+      meta = new TSMeta(tsuid);
+    } else {
+      meta = new TSMeta();
+    }
     
     final String display_name = query.getQueryStringParam("display_name");
     if (display_name != null) {
@@ -616,6 +622,7 @@ final class UniqueIdRpc implements HttpRpc {
    * @param data_query The query we're building
    * @throws BadRequestException if we are unable to parse the query or it is
    * missing components
+   * @todo - make this asynchronous
    */
   private String getTSUIDForMetric(final String query_string, TSDB tsdb) {
     if (query_string == null || query_string.isEmpty()) {
@@ -632,16 +639,23 @@ final class UniqueIdRpc implements HttpRpc {
     } catch (IllegalArgumentException e) {
       throw new BadRequestException(e);
     }
-    final TreeMap<String, String> sortedTags = new TreeMap<String, String>(tags);
+    
+    // sort the UIDs on tagk values
+    final ByteMap<byte[]> tag_uids = new ByteMap<byte[]>();
+    for (final Entry<String, String> pair : tags.entrySet()) {
+      tag_uids.put(tsdb.getUID(UniqueIdType.TAGK, pair.getKey()), 
+          tsdb.getUID(UniqueIdType.TAGV, pair.getValue()));
+    }
+    
     // Byte Buffer to generate TSUID, pre allocated to the size of the TSUID
     final ByteArrayOutputStream buf = new ByteArrayOutputStream(
-        TSDB.metrics_width() + sortedTags.size() * 
+        TSDB.metrics_width() + tag_uids.size() * 
         (TSDB.tagk_width() + TSDB.tagv_width()));
     try {
-    buf.write(tsdb.getUID(UniqueIdType.METRIC, metric));
-      for (Entry<String, String> e: sortedTags.entrySet()) {
-        buf.write(tsdb.getUID(UniqueIdType.TAGK, e.getKey()), 0, 3);
-        buf.write(tsdb.getUID(UniqueIdType.TAGV, e.getValue()), 0, 3);
+      buf.write(tsdb.getUID(UniqueIdType.METRIC, metric));
+      for (final Entry<byte[], byte[]> uids: tag_uids.entrySet()) {
+        buf.write(uids.getKey());
+        buf.write(uids.getValue());
       }
     } catch (IOException e) {
       throw new BadRequestException(e);

@@ -12,11 +12,15 @@
 // see <http://www.gnu.org/licenses/>.
 package net.opentsdb.core;
 
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.stumbleupon.async.Callback;
 import com.stumbleupon.async.Deferred;
@@ -24,6 +28,7 @@ import com.stumbleupon.async.DeferredGroupException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.hbase.async.AppendRequest;
 import org.hbase.async.Bytes;
 import org.hbase.async.Bytes.ByteMap;
 import org.hbase.async.ClientStats;
@@ -33,22 +38,33 @@ import org.hbase.async.HBaseClient;
 import org.hbase.async.HBaseException;
 import org.hbase.async.KeyValue;
 import org.hbase.async.PutRequest;
+import org.jboss.netty.util.HashedWheelTimer;
+import org.jboss.netty.util.Timeout;
+import org.jboss.netty.util.Timer;
 
 import net.opentsdb.tree.TreeBuilder;
 import net.opentsdb.tsd.RTPublisher;
-import net.opentsdb.tsd.RpcPlugin;
+import net.opentsdb.tsd.StorageExceptionHandler;
+import net.opentsdb.uid.NoSuchUniqueId;
 import net.opentsdb.uid.NoSuchUniqueName;
 import net.opentsdb.uid.UniqueId;
+import net.opentsdb.uid.UniqueIdFilterPlugin;
 import net.opentsdb.uid.UniqueId.UniqueIdType;
 import net.opentsdb.utils.Config;
 import net.opentsdb.utils.DateTime;
 import net.opentsdb.utils.PluginLoader;
+import net.opentsdb.utils.Threads;
 import net.opentsdb.meta.Annotation;
+import net.opentsdb.meta.MetaDataCache;
 import net.opentsdb.meta.TSMeta;
 import net.opentsdb.meta.UIDMeta;
+import net.opentsdb.query.expression.ExpressionFactory;
+import net.opentsdb.query.filter.TagVFilter;
 import net.opentsdb.search.SearchPlugin;
 import net.opentsdb.search.SearchQuery;
+import net.opentsdb.tools.StartupPlugin;
 import net.opentsdb.stats.Histogram;
+import net.opentsdb.stats.QueryStats;
 import net.opentsdb.stats.StatsCollector;
 
 /**
@@ -65,11 +81,11 @@ public final class TSDB {
   /** Charset used to convert Strings to byte arrays and back. */
   private static final Charset CHARSET = Charset.forName("ISO-8859-1");
   private static final String METRICS_QUAL = "metrics";
-  private static final short METRICS_WIDTH = 3;
+  private static short METRICS_WIDTH = 3;
   private static final String TAG_NAME_QUAL = "tagk";
-  private static final short TAG_NAME_WIDTH = 3;
+  private static short TAG_NAME_WIDTH = 3;
   private static final String TAG_VALUE_QUAL = "tagv";
-  private static final short TAG_VALUE_WIDTH = 3;
+  private static short TAG_VALUE_WIDTH = 3;
 
   /** Client for the HBase cluster to use.  */
   final HBaseClient client;
@@ -93,6 +109,9 @@ public final class TSDB {
   /** Configuration object for all TSDB components */
   final Config config;
 
+  /** Timer used for various tasks such as idle timeouts or query timeouts */
+  private final HashedWheelTimer timer;
+  
   /**
    * Row keys that need to be compacted.
    * Whenever we write a new data point to a row, we add the row key to this
@@ -103,12 +122,31 @@ public final class TSDB {
 
   /** Search indexer to use if configure */
   private SearchPlugin search = null;
-  
+
+  /** Optional Startup Plugin to use if configured */
+  private StartupPlugin startup = null;
+
   /** Optional real time pulblisher plugin to use if configured */
   private RTPublisher rt_publisher = null;
   
-  /** List of activated RPC plugins */
-  private List<RpcPlugin> rpc_plugins = null;
+  /** Optional plugin for handling meta data caching and updating */
+  private MetaDataCache meta_cache = null;
+  
+  /** Plugin for dealing with data points that can't be stored */
+  private StorageExceptionHandler storage_exception_handler = null;
+
+  /** A filter plugin for allowing or blocking time series */
+  private WriteableDataPointFilterPlugin ts_filter;
+  
+  /** A filter plugin for allowing or blocking UIDs */
+  private UniqueIdFilterPlugin uid_filter;
+  
+  /** Writes rejected by the filter */ 
+  private final AtomicLong rejected_dps = new AtomicLong();
+  private final AtomicLong rejected_aggregate_dps = new AtomicLong();
+  
+  /** Datapoints Added */
+  private static final AtomicLong datapoints_added = new AtomicLong();
 
   /**
    * Constructor
@@ -118,29 +156,71 @@ public final class TSDB {
    */
   public TSDB(final HBaseClient client, final Config config) {
     this.config = config;
-    this.client = client;
-
-    this.client.setFlushInterval(config.getShort("tsd.storage.flush_interval"));
+    if (client == null) {
+      final org.hbase.async.Config async_config;
+      if (config.configLocation() != null && !config.configLocation().isEmpty()) {
+        try {
+          async_config = new org.hbase.async.Config(config.configLocation());
+        } catch (final IOException e) {
+          throw new RuntimeException("Failed to read the config file: " + 
+              config.configLocation(), e);
+        }
+      } else {
+        async_config = new org.hbase.async.Config();
+      }
+      async_config.overrideConfig("hbase.zookeeper.znode.parent", 
+          config.getString("tsd.storage.hbase.zk_basedir"));
+      async_config.overrideConfig("hbase.zookeeper.quorum", 
+          config.getString("tsd.storage.hbase.zk_quorum"));
+      this.client = new HBaseClient(async_config);
+    } else {
+      this.client = client;
+    }
+    
+    // SALT AND UID WIDTHS
+    // Users really wanted this to be set via config instead of having to 
+    // compile. Hopefully they know NOT to change these after writing data.
+    if (config.hasProperty("tsd.storage.uid.width.metric")) {
+      METRICS_WIDTH = config.getShort("tsd.storage.uid.width.metric");
+    }
+    if (config.hasProperty("tsd.storage.uid.width.tagk")) {
+      TAG_NAME_WIDTH = config.getShort("tsd.storage.uid.width.tagk");
+    }
+    if (config.hasProperty("tsd.storage.uid.width.tagv")) {
+      TAG_VALUE_WIDTH = config.getShort("tsd.storage.uid.width.tagv");
+    }
+    if (config.hasProperty("tsd.storage.max_tags")) {
+      Const.setMaxNumTags(config.getShort("tsd.storage.max_tags"));
+    }
+    if (config.hasProperty("tsd.storage.salt.buckets")) {
+      Const.setSaltBuckets(config.getInt("tsd.storage.salt.buckets"));
+    }
+    if (config.hasProperty("tsd.storage.salt.width")) {
+      Const.setSaltWidth(config.getInt("tsd.storage.salt.width"));
+    }
+    
     table = config.getString("tsd.storage.hbase.data_table").getBytes(CHARSET);
     uidtable = config.getString("tsd.storage.hbase.uid_table").getBytes(CHARSET);
     treetable = config.getString("tsd.storage.hbase.tree_table").getBytes(CHARSET);
     meta_table = config.getString("tsd.storage.hbase.meta_table").getBytes(CHARSET);
 
-    metrics = new UniqueId(client, uidtable, METRICS_QUAL, METRICS_WIDTH);
-    tag_names = new UniqueId(client, uidtable, TAG_NAME_QUAL, TAG_NAME_WIDTH);
-    tag_values = new UniqueId(client, uidtable, TAG_VALUE_QUAL, TAG_VALUE_WIDTH);
+    if (config.getBoolean("tsd.core.uid.random_metrics")) {
+      metrics = new UniqueId(this, uidtable, METRICS_QUAL, METRICS_WIDTH, true);
+    } else {
+      metrics = new UniqueId(this, uidtable, METRICS_QUAL, METRICS_WIDTH, false);
+    }
+    tag_names = new UniqueId(this, uidtable, TAG_NAME_QUAL, TAG_NAME_WIDTH, false);
+    tag_values = new UniqueId(this, uidtable, TAG_VALUE_QUAL, TAG_VALUE_WIDTH, false);
     compactionq = new CompactionQueue(this);
-
+    
     if (config.hasProperty("tsd.core.timezone")) {
       DateTime.setDefaultTimezone(config.getString("tsd.core.timezone"));
     }
-    if (config.enable_realtime_ts() || config.enable_realtime_uid()) {
-      // this is cleaner than another constructor and defaults to null. UIDs 
-      // will be refactored with DAL code anyways
-      metrics.setTSDB(this);
-      tag_names.setTSDB(this);
-      tag_values.setTSDB(this);
-    }
+    
+    timer = Threads.newTimer("TSDB Timer");
+    
+    QueryStats.setEnableDuplicates(
+        config.getBoolean("tsd.query.allow_simultaneous_duplicates"));
     
     if (config.getBoolean("tsd.core.preload_uid_cache")) {
       final ByteMap<UniqueId> uid_cache_map = new ByteMap<UniqueId>();
@@ -149,25 +229,50 @@ public final class TSDB {
       uid_cache_map.put(TAG_VALUE_QUAL.getBytes(CHARSET), tag_values);
       UniqueId.preloadUidCache(this, uid_cache_map);
     }
+    
+    if (config.getString("tsd.core.tag.allow_specialchars") != null) {
+      Tags.setAllowSpecialChars(config.getString("tsd.core.tag.allow_specialchars"));
+    }
+    
+    // load up the functions that require the TSDB object
+    ExpressionFactory.addTSDBFunctions(this);
+    
+    // set any extra tags from the config for stats
+    StatsCollector.setGlobalTags(config);
+    
     LOG.debug(config.dumpConfiguration());
   }
-
+  
   /**
    * Constructor
    * @param config An initialized configuration object
    * @since 2.0
    */
   public TSDB(final Config config) {
-    this(new HBaseClient(config.getString("tsd.storage.hbase.zk_quorum"),
-                         config.getString("tsd.storage.hbase.zk_basedir")),
-         config);
+    this(null, config);
   }
   
   /** @return The data point column family name */
   public static byte[] FAMILY() {
     return FAMILY;
   }
-  
+
+  /**
+   * Called by initializePlugins, also used to load startup plugins.
+   * @since 2.3
+   */
+  public static void loadPluginPath(final String plugin_path) {
+    if (plugin_path != null && !plugin_path.isEmpty()) {
+      try {
+        PluginLoader.loadJARs(plugin_path);
+      } catch (Exception e) {
+        LOG.error("Error loading plugins from plugin path: " + plugin_path, e);
+        throw new RuntimeException("Error loading plugins from plugin path: " +
+                plugin_path, e);
+      }
+    }
+  }
+
   /**
    * Should be called immediately after construction to initialize plugins and
    * objects that rely on such. It also moves most of the potential exception
@@ -180,14 +285,25 @@ public final class TSDB {
    */
   public void initializePlugins(final boolean init_rpcs) {
     final String plugin_path = config.getString("tsd.core.plugin_path");
-    if (plugin_path != null && !plugin_path.isEmpty()) {
-      try {
-        PluginLoader.loadJARs(plugin_path);
-      } catch (Exception e) {
-        LOG.error("Error loading plugins from plugin path: " + plugin_path, e);
-        throw new RuntimeException("Error loading plugins from plugin path: " + 
-            plugin_path, e);
-      }
+    loadPluginPath(plugin_path);
+
+    try {
+      TagVFilter.initializeFilterMap(this);
+      // @#$@%$%#$ing typed exceptions
+    } catch (SecurityException e) {
+      throw new RuntimeException("Failed to instantiate filters", e);
+    } catch (IllegalArgumentException e) {
+      throw new RuntimeException("Failed to instantiate filters", e);
+    } catch (ClassNotFoundException e) {
+      throw new RuntimeException("Failed to instantiate filters", e);
+    } catch (NoSuchMethodException e) {
+      throw new RuntimeException("Failed to instantiate filters", e);
+    } catch (NoSuchFieldException e) {
+      throw new RuntimeException("Failed to instantiate filters", e);
+    } catch (IllegalAccessException e) {
+      throw new RuntimeException("Failed to instantiate filters", e);
+    } catch (InvocationTargetException e) {
+      throw new RuntimeException("Failed to instantiate filters", e);
     }
 
     // load the search plugin if enabled
@@ -232,30 +348,87 @@ public final class TSDB {
       rt_publisher = null;
     }
     
-    if (init_rpcs && config.hasProperty("tsd.rpc.plugins")) {
-      final String[] plugins = config.getString("tsd.rpc.plugins").split(",");
-      for (final String plugin : plugins) {
-        final RpcPlugin rpc = PluginLoader.loadSpecificPlugin(plugin.trim(), 
-            RpcPlugin.class);
-        if (rpc == null) {
-          throw new IllegalArgumentException(
-              "Unable to locate RPC plugin: " + plugin.trim());
-        }
-        try {
-          rpc.initialize(this);
-        } catch (Exception e) {
-          throw new RuntimeException(
-              "Failed to initialize RPC plugin", e);
-        }
-        
-        if (rpc_plugins == null) {
-          rpc_plugins = new ArrayList<RpcPlugin>(1);
-        }
-        rpc_plugins.add(rpc);
-        LOG.info("Successfully initialized RPC plugin [" + 
-            rpc.getClass().getCanonicalName() + "] version: " 
-            + rpc.version());
+    // load the meta cache plugin if enabled
+    if (config.getBoolean("tsd.core.meta.cache.enable")) {
+      meta_cache = PluginLoader.loadSpecificPlugin(
+          config.getString("tsd.core.meta.cache.plugin"), MetaDataCache.class);
+      if (meta_cache == null) {
+        throw new IllegalArgumentException(
+            "Unable to locate meta cache plugin: " + 
+            config.getString("tsd.core.meta.cache.plugin"));
       }
+      try {
+        meta_cache.initialize(this);
+      } catch (Exception e) {
+        throw new RuntimeException(
+            "Failed to initialize meta cache plugin", e);
+      }
+      LOG.info("Successfully initialized meta cache plugin [" + 
+          meta_cache.getClass().getCanonicalName() + "] version: " 
+          + meta_cache.version());
+    }
+    
+    // load the storage exception plugin if enabled
+    if (config.getBoolean("tsd.core.storage_exception_handler.enable")) {
+      storage_exception_handler = PluginLoader.loadSpecificPlugin(
+          config.getString("tsd.core.storage_exception_handler.plugin"), 
+          StorageExceptionHandler.class);
+      if (storage_exception_handler == null) {
+        throw new IllegalArgumentException(
+            "Unable to locate storage exception handler plugin: " + 
+            config.getString("tsd.core.storage_exception_handler.plugin"));
+      }
+      try {
+        storage_exception_handler.initialize(this);
+      } catch (Exception e) {
+        throw new RuntimeException(
+            "Failed to initialize storage exception handler plugin", e);
+      }
+      LOG.info("Successfully initialized storage exception handler plugin [" + 
+          storage_exception_handler.getClass().getCanonicalName() + "] version: " 
+          + storage_exception_handler.version());
+    }
+    
+    // Writeable Data Point Filter
+    if (config.getBoolean("tsd.timeseriesfilter.enable")) {
+      ts_filter = PluginLoader.loadSpecificPlugin(
+          config.getString("tsd.timeseriesfilter.plugin"), 
+          WriteableDataPointFilterPlugin.class);
+      if (ts_filter == null) {
+        throw new IllegalArgumentException(
+            "Unable to locate time series filter plugin plugin: " + 
+            config.getString("tsd.timeseriesfilter.plugin"));
+      }
+      try {
+        ts_filter.initialize(this);
+      } catch (Exception e) {
+        throw new RuntimeException(
+            "Failed to initialize time series filter plugin", e);
+      }
+      LOG.info("Successfully initialized time series filter plugin [" + 
+          ts_filter.getClass().getCanonicalName() + "] version: " 
+          + ts_filter.version());
+    }
+    
+    // UID Filter
+    if (config.getBoolean("tsd.uidfilter.enable")) {
+      uid_filter = PluginLoader.loadSpecificPlugin(
+          config.getString("tsd.uidfilter.plugin"), 
+          UniqueIdFilterPlugin.class);
+      if (uid_filter == null) {
+        throw new IllegalArgumentException(
+            "Unable to locate UID filter plugin plugin: " + 
+            config.getString("tsd.uidfilter.plugin"));
+      }
+      try {
+        uid_filter.initialize(this);
+      } catch (Exception e) {
+        throw new RuntimeException(
+            "Failed to initialize UID filter plugin", e);
+      }
+      LOG.info("Successfully initialized UID filter plugin [" + 
+          uid_filter.getClass().getCanonicalName() + "] version: " 
+          + uid_filter.version());
     }
   }
   
@@ -267,8 +440,28 @@ public final class TSDB {
   public final HBaseClient getClient() {
     return this.client;
   }
+
+  /**
+   * Sets the startup plugin so that it can be shutdown properly. 
+   * Note that this method will not initialize or call any other methods 
+   * belonging to the plugin's implementation.
+   * @param plugin The startup plugin that was used. 
+   * @since 2.3
+   */
+  public final void setStartupPlugin(final StartupPlugin plugin) { 
+    startup = plugin; 
+  }
   
-  /** 
+  /**
+   * Getter that returns the startup plugin object.
+   * @return The StartupPlugin object or null if the plugin was not set.
+   * @since 2.3
+   */
+  public final StartupPlugin getStartupPlugin() { 
+    return startup; 
+  }
+
+  /**
    * Getter that returns the configuration object
    * @return The configuration object
    * @since 2.0 
@@ -276,7 +469,32 @@ public final class TSDB {
   public final Config getConfig() {
     return this.config;
   }
+  
+  /**
+   * Returns the storage exception handler. May be null if not enabled
+   * @return The storage exception handler
+   * @since 2.2
+   */
+  public final StorageExceptionHandler getStorageExceptionHandler() {
+    return storage_exception_handler;
+  }
 
+  /**
+   * @return the TS filter object, may be null
+   * @since 2.3
+   */
+  public WriteableDataPointFilterPlugin getTSfilter() {
+    return ts_filter;
+  }
+  
+  /** 
+   * @return The UID filter object, may be null. 
+   * @since 2.3 
+   */
+  public UniqueIdFilterPlugin getUidFilter() {
+    return uid_filter;
+  }
+  
   /**
    * Attempts to find the name for a unique identifier given a type
    * @param type The type of UID
@@ -312,18 +530,15 @@ public final class TSDB {
    * @since 2.0
    */
   public byte[] getUID(final UniqueIdType type, final String name) {
-    if (name == null || name.isEmpty()) {
-      throw new IllegalArgumentException("Missing UID name");
-    }
-    switch (type) {
-      case METRIC:
-        return this.metrics.getId(name);
-      case TAGK:
-        return this.tag_names.getId(name);
-      case TAGV:
-        return this.tag_values.getId(name);
-      default:
-        throw new IllegalArgumentException("Unrecognized UID type");
+    try {
+      return getUIDAsync(type, name).join();
+    } catch (NoSuchUniqueName e) {
+      throw e;
+    } catch (IllegalArgumentException e) {
+      throw e;
+    } catch (Exception e) {
+      LOG.error("Unexpected exception", e);
+      throw new RuntimeException(e);
     }
   }
   
@@ -411,29 +626,39 @@ public final class TSDB {
         .joinUninterruptibly();
       
       collectUidStats(metrics, collector);
-      collector.record("uid.ids-used", used_uids.get(METRICS_QUAL), 
-          "kind=" + METRICS_QUAL);
-      collector.record("uid.ids-available", 
-          (metrics.maxPossibleId() - used_uids.get(METRICS_QUAL)), 
-          "kind=" + METRICS_QUAL);
+      if (config.getBoolean("tsd.core.uid.random_metrics")) {
+        collector.record("uid.ids-used", 0, "kind=" + METRICS_QUAL);
+        collector.record("uid.ids-available", 0, "kind=" + METRICS_QUAL);
+      } else {
+        collector.record("uid.ids-used", used_uids.get(METRICS_QUAL), 
+            "kind=" + METRICS_QUAL);
+        collector.record("uid.ids-available", 
+            (Internal.getMaxUnsignedValueOnBytes(metrics.width()) - 
+                used_uids.get(METRICS_QUAL)), "kind=" + METRICS_QUAL);
+      }
       
       collectUidStats(tag_names, collector);
       collector.record("uid.ids-used", used_uids.get(TAG_NAME_QUAL), 
           "kind=" + TAG_NAME_QUAL);
       collector.record("uid.ids-available", 
-          (tag_names.maxPossibleId() - used_uids.get(TAG_NAME_QUAL)), 
+          (Internal.getMaxUnsignedValueOnBytes(tag_names.width()) - 
+              used_uids.get(TAG_NAME_QUAL)), 
           "kind=" + TAG_NAME_QUAL);
       
       collectUidStats(tag_values, collector);
       collector.record("uid.ids-used", used_uids.get(TAG_VALUE_QUAL), 
           "kind=" + TAG_VALUE_QUAL);
       collector.record("uid.ids-available", 
-          (tag_values.maxPossibleId() - used_uids.get(TAG_VALUE_QUAL)), 
-          "kind=" + TAG_VALUE_QUAL);
+          (Internal.getMaxUnsignedValueOnBytes(tag_values.width()) - 
+              used_uids.get(TAG_VALUE_QUAL)), "kind=" + TAG_VALUE_QUAL);
       
     } catch (Exception e) {
       throw new RuntimeException("Shouldn't be here", e);
     }
+    
+    collector.record("uid.filter.rejected", rejected_dps.get(), "kind=raw");
+    collector.record("uid.filter.rejected", rejected_aggregate_dps.get(), 
+        "kind=aggregate");
 
     {
       final Runtime runtime = Runtime.getRuntime();
@@ -444,6 +669,13 @@ public final class TSDB {
     collector.addExtraTag("class", "IncomingDataPoints");
     try {
       collector.record("hbase.latency", IncomingDataPoints.putlatency, "method=put");
+    } finally {
+      collector.clearExtraTag("class");
+    }
+
+    collector.addExtraTag("class", "TSDB");
+    try {
+      collector.record("datapoints.added", datapoints_added, "type=all");
     } finally {
       collector.clearExtraTag("class");
     }
@@ -465,44 +697,72 @@ public final class TSDB {
     collector.record("hbase.rpcs", stats.deletes(), "type=delete");
     collector.record("hbase.rpcs", stats.gets(), "type=get");
     collector.record("hbase.rpcs", stats.puts(), "type=put");
+    collector.record("hbase.rpcs", stats.appends(), "type=append");
     collector.record("hbase.rpcs", stats.rowLocks(), "type=rowLock");
     collector.record("hbase.rpcs", stats.scannersOpened(), "type=openScanner");
     collector.record("hbase.rpcs", stats.scans(), "type=scan");
     collector.record("hbase.rpcs.batched", stats.numBatchedRpcSent());
     collector.record("hbase.flushes", stats.flushes());
     collector.record("hbase.connections.created", stats.connectionsCreated());
+    collector.record("hbase.connections.idle_closed", stats.idleConnectionsClosed());
     collector.record("hbase.nsre", stats.noSuchRegionExceptions());
     collector.record("hbase.nsre.rpcs_delayed",
                      stats.numRpcDelayedDueToNSRE());
+    collector.record("hbase.region_clients.open",
+        stats.regionClients());
+    collector.record("hbase.region_clients.idle_closed",
+        stats.idleConnectionsClosed());
 
     compactionq.collectStats(collector);
     // Collect Stats from Plugins
+    if (startup != null) {
+      try {
+        collector.addExtraTag("plugin", "startup");
+        startup.collectStats(collector);
+      } finally {
+        collector.clearExtraTag("plugin");
+      }
+    }
     if (rt_publisher != null) {
       try {
-	collector.addExtraTag("plugin", "publish");
+        collector.addExtraTag("plugin", "publish");
         rt_publisher.collectStats(collector);
       } finally {
-	collector.clearExtraTag("plugin");
+        collector.clearExtraTag("plugin");
       }                        
     }
     if (search != null) {
       try {
-	collector.addExtraTag("plugin", "search");
-	search.collectStats(collector);
+        collector.addExtraTag("plugin", "search");
+        search.collectStats(collector);
       } finally {
-	collector.clearExtraTag("plugin");
+        collector.clearExtraTag("plugin");
       }                        
     }
-    if (rpc_plugins != null) {
+    if (storage_exception_handler != null) {
       try {
-	collector.addExtraTag("plugin", "rpc");
-	for(RpcPlugin rpc: rpc_plugins) {
-		rpc.collectStats(collector);
-	}                                
+        collector.addExtraTag("plugin", "storageExceptionHandler");
+        storage_exception_handler.collectStats(collector);
       } finally {
-	collector.clearExtraTag("plugin");
-      }                        
-    }        
+        collector.clearExtraTag("plugin");
+      }
+    }
+    if (ts_filter != null) {
+      try {
+        collector.addExtraTag("plugin", "timeseriesFilter");
+        ts_filter.collectStats(collector);
+      } finally {
+        collector.clearExtraTag("plugin");
+      }
+    }
+    if (uid_filter != null) {
+      try {
+        collector.addExtraTag("plugin", "uidFilter");
+        uid_filter.collectStats(collector);
+      } finally {
+        collector.clearExtraTag("plugin");
+      }
+    }
   }
 
   /** Returns a latency histogram for Put RPCs used to store data points. */
@@ -525,6 +785,10 @@ public final class TSDB {
     collector.record("uid.cache-hit", uid.cacheHits(), "kind=" + uid.kind());
     collector.record("uid.cache-miss", uid.cacheMisses(), "kind=" + uid.kind());
     collector.record("uid.cache-size", uid.cacheSize(), "kind=" + uid.kind());
+    collector.record("uid.random-collisions", uid.randomIdCollisions(), 
+        "kind=" + uid.kind());
+    collector.record("uid.rejected-assignments", uid.rejectedAssignments(), 
+        "kind=" + uid.kind());
   }
 
   /** @return the width, in bytes, of metric UIDs */
@@ -557,6 +821,17 @@ public final class TSDB {
    */
   public WritableDataPoints newDataPoints() {
     return new IncomingDataPoints(this);
+  }
+
+  /**
+   * Returns a new {@link BatchedDataPoints} instance suitable for this TSDB.
+   * 
+   * @param metric Every data point that gets appended must be associated to this metric.
+   * @param tags The associated tags for all data points being added.
+   * @return data structure which can have data points appended.
+   */
+  public WritableDataPoints newBatch(String metric, Map<String, String> tags) {
+    return new BatchedDataPoints(this, metric, tags);
   }
 
   /**
@@ -593,6 +868,7 @@ public final class TSDB {
     } else {
       v = Bytes.fromLong(value);
     }
+
     final short flags = (short) (v.length - 1);  // Just the length.
     return addPointInternal(metric, timestamp, v, tags, flags);
   }
@@ -696,36 +972,81 @@ public final class TSDB {
       base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
     }
     
-    Bytes.setInt(row, (int) base_time, metrics.width());
-    scheduleForCompaction(row, (int) base_time);
-    final PutRequest point = new PutRequest(table, row, FAMILY, qualifier, value);
-    
-    // TODO(tsuna): Add a callback to time the latency of HBase and store the
-    // timing in a moving Histogram (once we have a class for this).
-    Deferred<Object> result = client.put(point);
-    if (!config.enable_realtime_ts() && !config.enable_tsuid_incrementing() && 
-        !config.enable_tsuid_tracking() && rt_publisher == null) {
-      return result;
+    /** Callback executed for chaining filter calls to see if the value
+     * should be written or not. */
+    final class WriteCB implements Callback<Deferred<Object>, Boolean> {
+      @Override
+      public Deferred<Object> call(final Boolean allowed) throws Exception {
+        if (!allowed) {
+          rejected_dps.incrementAndGet();
+          return Deferred.fromResult(null);
+        }
+        
+        Bytes.setInt(row, (int) base_time, metrics.width() + Const.SALT_WIDTH());
+        RowKey.prefixKeyWithSalt(row);
+
+        Deferred<Object> result = null;
+        if (config.enable_appends()) {
+          final AppendDataPoints kv = new AppendDataPoints(qualifier, value);
+          final AppendRequest point = new AppendRequest(table, row, FAMILY, 
+              AppendDataPoints.APPEND_COLUMN_QUALIFIER, kv.getBytes());
+          result = client.append(point);
+        } else {
+          scheduleForCompaction(row, (int) base_time);
+          final PutRequest point = new PutRequest(table, row, FAMILY, qualifier, value);
+          result = client.put(point);
+        }
+
+        // Count all added datapoints, not just those that came in through PUT rpc
+        // Will there be others? Well, something could call addPoint programatically right?
+        datapoints_added.incrementAndGet();
+
+        // TODO(tsuna): Add a callback to time the latency of HBase and store the
+        // timing in a moving Histogram (once we have a class for this).
+        
+        if (!config.enable_realtime_ts() && !config.enable_tsuid_incrementing() && 
+            !config.enable_tsuid_tracking() && rt_publisher == null) {
+          return result;
+        }
+        
+        final byte[] tsuid = UniqueId.getTSUIDFromKey(row, METRICS_WIDTH, 
+            Const.TIMESTAMP_BYTES);
+        
+        // if the meta cache plugin is instantiated then tracking goes through it
+        if (meta_cache != null) {
+          meta_cache.increment(tsuid);
+        } else {
+          if (config.enable_tsuid_tracking()) {
+            if (config.enable_realtime_ts()) {
+              if (config.enable_tsuid_incrementing()) {
+                TSMeta.incrementAndGetCounter(TSDB.this, tsuid);
+              } else {
+                TSMeta.storeIfNecessary(TSDB.this, tsuid);
+              }
+            } else {
+              final PutRequest tracking = new PutRequest(meta_table, tsuid, 
+                  TSMeta.FAMILY(), TSMeta.COUNTER_QUALIFIER(), Bytes.fromLong(1));
+              client.put(tracking);
+            }
+          }
+        }
+
+        if (rt_publisher != null) {
+          rt_publisher.sinkDataPoint(metric, timestamp, value, tags, tsuid, flags);
+        }
+        return result;
+      }
+      @Override
+      public String toString() {
+        return "addPointInternal Write Callback";
+      }
     }
     
-    final byte[] tsuid = UniqueId.getTSUIDFromKey(row, METRICS_WIDTH, 
-        Const.TIMESTAMP_BYTES);
-    
-    // for busy TSDs we may only enable TSUID tracking, storing a 1 in the
-    // counter field for a TSUID with the proper timestamp. If the user would
-    // rather have TSUID incrementing enabled, that will trump the PUT
-    if (config.enable_tsuid_tracking() && !config.enable_tsuid_incrementing()) {
-      final PutRequest tracking = new PutRequest(meta_table, tsuid, 
-          TSMeta.FAMILY(), TSMeta.COUNTER_QUALIFIER(), Bytes.fromLong(1));
-      client.put(tracking);
-    } else if (config.enable_tsuid_incrementing() || config.enable_realtime_ts()) {
-      TSMeta.incrementAndGetCounter(TSDB.this, tsuid);
+    if (ts_filter != null && ts_filter.filterDataPoints()) {
+      return ts_filter.allowDataPoint(metric, timestamp, value, tags, flags)
+          .addCallbackDeferring(new WriteCB());
     }
-    
-    if (rt_publisher != null) {
-      rt_publisher.sinkDataPoint(metric, timestamp, value, tags, tsuid, flags);
-    }
-    return result;
+    return Deferred.fromResult(true).addCallbackDeferring(new WriteCB());
   }
 
   /**
@@ -774,9 +1095,44 @@ public final class TSDB {
     final ArrayList<Deferred<Object>> deferreds = 
       new ArrayList<Deferred<Object>>();
     
-    final class HClientShutdown implements Callback<Object, ArrayList<Object>> {
-      public Object call(final ArrayList<Object> args) {
-        return client.shutdown();
+    final class FinalShutdown implements Callback<Object, Object> {
+      @Override
+      public Object call(Object result) throws Exception {
+        if (result instanceof Exception) {
+          LOG.error("A previous shutdown failed", (Exception)result);
+        }
+        final Set<Timeout> timeouts = timer.stop();
+        // TODO - at some point we should clean these up.
+        if (timeouts.size() > 0) {
+          LOG.warn("There were " + timeouts.size() + " timer tasks queued");
+        }
+        LOG.info("Completed shutting down the TSDB");
+        return Deferred.fromResult(null);
+      }
+    }
+    
+    final class SEHShutdown implements Callback<Object, Object> {
+      @Override
+      public Object call(Object result) throws Exception {
+        if (result instanceof Exception) {
+          LOG.error("Shutdown of the HBase client failed", (Exception)result);
+        }
+        LOG.info("Shutting down storage exception handler plugin: " + 
+            storage_exception_handler.getClass().getCanonicalName());
+        return storage_exception_handler.shutdown().addBoth(new FinalShutdown());
+      }
+      @Override
+      public String toString() {
+        return "SEHShutdown";
+      }
+    }
+    
+    final class HClientShutdown implements Callback<Deferred<Object>, ArrayList<Object>> {
+      public Deferred<Object> call(final ArrayList<Object> args) {
+        if (storage_exception_handler != null) {
+          return client.shutdown().addBoth(new SEHShutdown());
+        }
+        return client.shutdown().addBoth(new FinalShutdown());
       }
       public String toString() {
         return "shutdown HBase client";
@@ -796,7 +1152,7 @@ public final class TSDB {
         } else {
           LOG.error("Failed to shutdown the TSD", e);
         }
-        return client.shutdown();
+        return new HClientShutdown().call(null);
       }
       public String toString() {
         return "shutdown HBase client after error";
@@ -813,6 +1169,11 @@ public final class TSDB {
       LOG.info("Flushing compaction queue");
       deferreds.add(compactionq.flush().addCallback(new CompactCB()));
     }
+    if (startup != null) {
+      LOG.info("Shutting down startup plugin: " +
+              startup.getClass().getCanonicalName());
+      deferreds.add(startup.shutdown());
+    }
     if (search != null) {
       LOG.info("Shutting down search plugin: " + 
           search.getClass().getCanonicalName());
@@ -823,20 +1184,32 @@ public final class TSDB {
           rt_publisher.getClass().getCanonicalName());
       deferreds.add(rt_publisher.shutdown());
     }
-    
-    if (rpc_plugins != null && !rpc_plugins.isEmpty()) {
-      for (final RpcPlugin rpc : rpc_plugins) {
-        LOG.info("Shutting down RPC plugin: " + 
-            rpc.getClass().getCanonicalName());
-        deferreds.add(rpc.shutdown());
-      }
+    if (meta_cache != null) {
+      LOG.info("Shutting down meta cache plugin: " + 
+          meta_cache.getClass().getCanonicalName());
+      deferreds.add(meta_cache.shutdown());
+    }
+    if (storage_exception_handler != null) {
+      LOG.info("Shutting down storage exception handler plugin: " + 
+          storage_exception_handler.getClass().getCanonicalName());
+      deferreds.add(storage_exception_handler.shutdown());
+    }
+    if (ts_filter != null) {
+      LOG.info("Shutting down time series filter plugin: " + 
+          ts_filter.getClass().getCanonicalName());
+      deferreds.add(ts_filter.shutdown());
+    }
+    if (uid_filter != null) {
+      LOG.info("Shutting down UID filter plugin: " + 
+          uid_filter.getClass().getCanonicalName());
+      deferreds.add(uid_filter.shutdown());
     }
     
     // wait for plugins to shutdown before we close the client
     return deferreds.size() > 0
-      ? Deferred.group(deferreds).addCallbacks(new HClientShutdown(),
-                                               new ShutdownErrback())
-      : client.shutdown();
+      ? Deferred.group(deferreds).addCallbackDeferring(new HClientShutdown())
+          .addErrback(new ShutdownErrback())
+      : new HClientShutdown().call(null);
   }
 
   /**
@@ -948,6 +1321,29 @@ public final class TSDB {
     } else {
       LOG.warn("Unknown type name: " + type);
       throw new IllegalArgumentException("Unknown type name");
+    }
+  }
+  
+  /**
+   * Attempts to delete the given UID name mapping from the storage table as
+   * well as the local cache.
+   * @param type The type of UID to delete. Must be "metrics", "tagk" or "tagv"
+   * @param name The name of the UID to delete
+   * @return A deferred to wait on for completion, or an exception if thrown
+   * @throws IllegalArgumentException if the type is invalid
+   * @since 2.2
+   */
+  public Deferred<Object> deleteUidAsync(final String type, final String name) {
+    final UniqueIdType uid_type = UniqueId.stringToUniqueIdType(type);
+    switch (uid_type) {
+    case METRIC:
+      return metrics.deleteAsync(name);
+    case TAGK:
+      return tag_names.deleteAsync(name);
+    case TAGV:
+      return tag_values.deleteAsync(name);
+    default:
+      throw new IllegalArgumentException("Unrecognized UID type: " + uid_type); 
     }
   }
   
@@ -1126,6 +1522,39 @@ public final class TSDB {
       LOG.error("Exception from Search plugin indexer", e);
       return null;
     }
+  }
+  
+  /**
+   * Blocks while pre-fetching meta data from the data and uid tables
+   * so that performance improves, particularly with a large number of 
+   * regions and region servers.
+   * @since 2.2
+   */
+  public void preFetchHBaseMeta() {
+    LOG.info("Pre-fetching meta data for all tables");
+    final long start = System.currentTimeMillis();
+    final ArrayList<Deferred<Object>> deferreds = new ArrayList<Deferred<Object>>();
+    deferreds.add(client.prefetchMeta(table));
+    deferreds.add(client.prefetchMeta(uidtable));
+    
+    // TODO(cl) - meta, tree, etc
+    
+    try {
+      Deferred.group(deferreds).join();
+      LOG.info("Fetched meta data for tables in " + 
+          (System.currentTimeMillis() - start) + "ms");
+    } catch (InterruptedException e) {
+      LOG.error("Interrupted", e);
+      Thread.currentThread().interrupt();
+      return;
+    } catch (Exception e) {
+      LOG.error("Failed to prefetch meta for our tables", e);
+    }
+  }
+  
+  /** @return the timer used for various house keeping functions */
+  public Timer getTimer() {
+    return timer;
   }
   
   // ------------------ //

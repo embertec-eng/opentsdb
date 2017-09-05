@@ -115,7 +115,7 @@ import org.slf4j.LoggerFactory;
  * to a special, really large value (too large to be a valid timestamp).
  * <p>
  */
-final class AggregationIterator implements SeekableView, DataPoint,
+public class AggregationIterator implements SeekableView, DataPoint,
                                            Aggregator.Longs, Aggregator.Doubles {
 
   private static final Logger LOG =
@@ -129,7 +129,7 @@ final class AggregationIterator implements SeekableView, DataPoint,
    * possibly store, provided that the most significant bit is reserved by
    * FLAG_FLOAT.
    */
-  private static final long TIME_MASK  = 0x7FFFFFFFFFFFFFFFL;
+  protected static final long TIME_MASK  = 0x7FFFFFFFFFFFFFFFL;
 
   /** Aggregator to use to aggregate data points from different Spans. */
   private final Aggregator aggregator;
@@ -148,13 +148,13 @@ final class AggregationIterator implements SeekableView, DataPoint,
    * Once we reach the end of a Span, we'll null out its iterator from this
    * array.
    */
-  private final SeekableView[] iterators;
+  protected final SeekableView[] iterators;
 
   /** Start time (UNIX timestamp in seconds or ms) on 32 bits ("unsigned" int). */
-  private final long start_time;
+  protected final long start_time;
 
   /** End time (UNIX timestamp in seconds or ms) on 32 bits ("unsigned" int). */
-  private final long end_time;
+  protected final long end_time;
 
   /**
    * The current and previous timestamps for the data points being used.
@@ -178,7 +178,7 @@ final class AggregationIterator implements SeekableView, DataPoint,
    * linear interpolation anymore.</li>
    * </ul>
    */
-  private final long[] timestamps; // 32 bit unsigned + flag
+  protected final long[] timestamps; // 32 bit unsigned + flag
 
   /**
    * The current and next values for the data points being used.
@@ -186,7 +186,7 @@ final class AggregationIterator implements SeekableView, DataPoint,
    * This array is also used to store floating point values, in which case
    * their binary representation just happens to be stored in a {@code long}.
    */
-  private final long[] values;
+  protected final long[] values;
 
   /** The index in {@link #iterators} of the current Span being used. */
   private int current;
@@ -222,6 +222,42 @@ final class AggregationIterator implements SeekableView, DataPoint,
                                            final long sample_interval_ms,
                                            final boolean rate,
                                            final RateOptions rate_options) {
+    return create(spans, start_time, end_time, aggregator, method, downsampler,
+        sample_interval_ms, rate, rate_options, null);
+  }
+  
+  /**
+   * Creates a new iterator for a {@link SpanGroup}.
+   * @param spans Spans in a group.
+   * @param start_time Any data point strictly before this timestamp will be
+   * ignored.
+   * @param end_time Any data point strictly after this timestamp will be
+   * ignored.
+   * @param aggregator The aggregation function to use.
+   * @param method Interpolation method to use when aggregating time series
+   * @param downsampler Aggregation function to use to group data points
+   * within an interval.
+   * @param sample_interval_ms Number of milliseconds wanted between each data
+   * point.
+   * @param rate If {@code true}, the rate of the series will be used instead
+   * of the actual values.
+   * @param rate_options Specifies the optional additional rate calculation
+   * options.
+   * @param fill_policy Policy specifying whether to interpolate or to fill
+   * missing intervals with special values.
+   * @return An {@link AggregationIterator} object.
+   * @since 2.2
+   */
+  public static AggregationIterator create(final List<Span> spans,
+                                           final long start_time,
+                                           final long end_time,
+                                           final Aggregator aggregator,
+                                           final Interpolation method,
+                                           final Aggregator downsampler,
+                                           final long sample_interval_ms,
+                                           final boolean rate,
+                                           final RateOptions rate_options,
+                                           final FillPolicy fill_policy) {
     final int size = spans.size();
     final SeekableView[] iterators = new SeekableView[size];
     for (int i = 0; i < size; i++) {
@@ -229,7 +265,8 @@ final class AggregationIterator implements SeekableView, DataPoint,
       if (downsampler == null) {
         it = spans.get(i).spanIterator();
       } else {
-        it = spans.get(i).downsampler(sample_interval_ms, downsampler);
+        it = spans.get(i).downsampler(start_time, end_time, sample_interval_ms, 
+            downsampler, fill_policy);
       }
       if (rate) {
         it = new RateSpan(it, rate_options);
@@ -240,6 +277,55 @@ final class AggregationIterator implements SeekableView, DataPoint,
                                    method, rate);
   }
 
+  /**
+   * Creates a new iterator for a {@link SpanGroup}.
+   * @param spans Spans in a group.
+   * @param start_time Any data point strictly before this timestamp will be
+   * ignored.
+   * @param end_time Any data point strictly after this timestamp will be
+   * ignored.
+   * @param aggregator The aggregation function to use.
+   * @param method Interpolation method to use when aggregating time series
+   * @param downsampler The downsampling specifier to use (cannot be null)
+   * @param query_start Start of the actual query
+   * @param query_end End of the actual query
+   * @param rate If {@code true}, the rate of the series will be used instead
+   * of the actual values.
+   * @param rate_options Specifies the optional additional rate calculation
+   * options.
+   * @return an AggregationIterator
+   * @since 2.3
+   */
+  public static AggregationIterator create(final List<Span> spans,
+      final long start_time,
+      final long end_time,
+      final Aggregator aggregator,
+      final Interpolation method,
+      final DownsamplingSpecification downsampler,
+      final long query_start,
+      final long query_end,
+      final boolean rate,
+      final RateOptions rate_options) {
+    final int size = spans.size();
+    final SeekableView[] iterators = new SeekableView[size];
+    for (int i = 0; i < size; i++) {
+      SeekableView it;
+      if (downsampler == null || 
+          downsampler == DownsamplingSpecification.NO_DOWNSAMPLER) {
+        it = spans.get(i).spanIterator();
+      } else {
+        it = spans.get(i).downsampler(start_time, end_time, downsampler, 
+            query_start, query_end);
+      }
+      if (rate) {
+        it = new RateSpan(it, rate_options);
+      }
+      iterators[i] = it;
+    }
+    return new AggregationIterator(iterators, start_time, end_time, aggregator,
+    method, rate);  
+  }
+  
   /**
    * Creates an aggregation iterator for a group of data point iterators.
    * @param iterators An array of Seekable views of spans in a group. Ignored
@@ -253,7 +339,7 @@ final class AggregationIterator implements SeekableView, DataPoint,
    * @param rate If {@code true}, the rate of the series will be used instead
    * of the actual values.
    */
-  private AggregationIterator(final SeekableView[] iterators,
+  public AggregationIterator(final SeekableView[] iterators,
                               final long start_time,
                               final long end_time,
                               final Aggregator aggregator,
@@ -487,8 +573,8 @@ final class AggregationIterator implements SeekableView, DataPoint,
       pos = -1;
       final double value = aggregator.runDouble(this);
       //LOG.debug("aggregator returned " + value);
-      if (value != value || Double.isInfinite(value)) {
-        throw new IllegalStateException("Got NaN or Infinity: "
+      if (Double.isInfinite(value)) {
+        throw new IllegalStateException("Got Infinity: "
            + value + " in this " + this);
       }
       return value;
@@ -568,7 +654,7 @@ final class AggregationIterator implements SeekableView, DataPoint,
           r = Long.MIN_VALUE;
           break;
         default:
-          throw new IllegalDataException("Invalid interploation somehow??");
+          throw new IllegalDataException("Invalid interpolation somehow??");
       }
       return r;
     }
