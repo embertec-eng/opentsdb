@@ -1,6 +1,17 @@
 OpenTSDB - User visible changes.
 
 
+* Version 2.3.0.2 (2017-09-06)
+
+Changes:
+  - Grab post-2.3.0 fixes from master. Noteworthy fixes:
+    - Fix #915 ('make install' issue)
+    - Fix #708 (flickering GUI in Firefox)
+    - Fix #953 (prevent remote command execution via gnuplot backticks)
+    - Bump AsyncHBase client to 1.8.0 for HBase 1.3.x compat.
+    - Remove the "final" modifier from the meta classes, for plugins.
+    - Fix #1050 (fix case when time zone aligned timestamp earlier than start)
+
 * Version 2.3.0.1 (2017-09-05)
 
 Changes:
