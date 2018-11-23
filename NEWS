@@ -1,6 +1,13 @@
 OpenTSDB - User visible changes.
 
 
+* Version 2.3.0.3 (2018-11-23)
+
+Changes:
+  - Grab Fix #572 and #877 by allowing for a config flag that allows for
+    importing out of order timestamps. Any timestamp that was out of
+    order will simply be redirected to the standard TSDB call.
+
 * Version 2.3.0.2 (2017-09-06)
 
 Changes:
