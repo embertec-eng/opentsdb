@@ -1,5 +1,10 @@
 OpenTSDB - User visible changes.
 
+* Version 2.3.2.1 (2019-01-17)
+
+Changes:
+  - Bring fork into line with 2.3.2, but retain 2.3.1.1 history.
+
 * Version 2.3.2 (2018-12-16)
 
 Noteworthy Changes:
